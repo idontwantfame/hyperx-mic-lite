@@ -387,6 +387,7 @@ struct MicLiteApp {
     lighting_device: Option<LightingDevice>,
     lighting_message: String,
     lighting_cancel: Option<Arc<AtomicBool>>,
+    lighting_autostart_applied: bool,
     start_minimized: bool,
     start_minimized_applied: bool,
 }
@@ -2817,19 +2818,19 @@ fn lightning_frames(colors: &[[u8; 3]], speed: u8) -> Vec<LightingFrame> {
 }
 
 fn smooth_vu_level(current: f32, target: f32) -> f32 {
-    let coefficient = if target > current { 0.22 } else { 0.07 };
+    let coefficient = if target > current { 0.34 } else { 0.12 };
     current + (target - current) * coefficient
 }
 
 fn vu_target_level(raw_peak: f32) -> f32 {
-    let normalized = ((raw_peak - 0.0003).max(0.0) * 85.0).clamp(0.0, 1.0);
-    normalized.powf(0.70)
+    let normalized = ((raw_peak - 0.00008).max(0.0) * 260.0).clamp(0.0, 1.0);
+    normalized.powf(0.55)
 }
 
 fn build_vu_frame(level: f32, brightness: u8, tick: u32) -> LightingFrame {
     let level = level.clamp(0.0, 1.0);
-    let visible_level = level.max(0.04);
-    let flame_height = 0.16 + visible_level * 0.80;
+    let visible_level = level.max(0.015);
+    let flame_height = 0.08 + visible_level * 0.88;
     let mut frame = solid_frame([0, 0, 0]);
     for (cell, slot) in frame.iter_mut().enumerate() {
         let height = cell as f32 / (LIGHTING_CELL_COUNT - 1) as f32;
@@ -3138,6 +3139,7 @@ impl MicLiteApp {
             lighting_device: detect_lighting_device(),
             lighting_message: String::new(),
             lighting_cancel: None,
+            lighting_autostart_applied: false,
             start_minimized,
             start_minimized_applied: false,
         };
@@ -3667,6 +3669,13 @@ impl MicLiteApp {
 
 impl eframe::App for MicLiteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.lighting_autostart_applied {
+            self.lighting_autostart_applied = true;
+            if self.lighting_device.is_some() {
+                self.apply_lighting_to_microphone();
+                log_event("info", "lighting.apply.autostart", &[]);
+            }
+        }
         if self.start_minimized && !self.start_minimized_applied {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
