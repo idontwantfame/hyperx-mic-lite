@@ -414,18 +414,8 @@ impl MicLiteApp {
         self.drain_hid_events();
         self.refresh_status_periodic();
         self.refresh_input_peak();
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            let pattern_width = 220.0;
-            let gap = 12.0;
-            let available = ui.available_width();
-            let stage_width = (available - pattern_width - gap).clamp(360.0, 720.0);
-            ui.allocate_ui(egui::vec2(stage_width, 250.0), |ui| {
-                self.ui_mic_stage(ui);
-            });
-            ui.add_space(gap);
-            ui.allocate_ui(egui::vec2(pattern_width, 250.0), |ui| {
-                self.ui_pattern_panel(ui);
-            });
+        ui.allocate_ui(egui::vec2(ui.available_width(), 250.0), |ui| {
+            self.ui_mic_stage(ui);
         });
         ui.separator();
         ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
@@ -667,14 +657,16 @@ impl MicLiteApp {
         });
     }
 
-    fn ui_mic_stage(&self, ui: &mut egui::Ui) {
+    fn ui_mic_stage(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_width();
         let height = ui.available_height().clamp(190.0, 290.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(available, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
 
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
-        let center = rect.center();
+        let pattern_width = 260.0_f32.min(rect.width() * 0.34).max(210.0);
+        let mic_area_right = rect.right() - pattern_width - 14.0;
+        let center = egui::pos2((rect.left() + mic_area_right) * 0.5, rect.center().y);
         let glow_radius = rect.height() * 0.36;
         for (index, color) in self.lighting.colors.iter().enumerate() {
             let angle = index as f32 / self.lighting.colors.len() as f32 * std::f32::consts::TAU;
@@ -704,6 +696,14 @@ impl MicLiteApp {
                 egui::Color32::from_rgb(210, 214, 218),
             );
         }
+
+        let pattern_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.right() - pattern_width - 12.0, rect.top() + 10.0),
+            egui::pos2(rect.right() - 10.0, rect.bottom() - 10.0),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(pattern_rect), |ui| {
+            self.ui_pattern_panel(ui);
+        });
     }
 }
 
