@@ -59,7 +59,8 @@ use windows::{
             DEVICE_STATE, DEVICE_STATE_ACTIVE, DEVICE_STATE_DISABLED, DEVICE_STATE_NOTPRESENT,
             DEVICE_STATE_UNPLUGGED, DEVICE_STATEMASK_ALL,
             Endpoints::{IAudioEndpointVolume, IAudioMeterInformation},
-            IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eCommunications,
+            IAudioMute, IAudioVolumeLevel, IDeviceTopology, IMMDevice, IMMDeviceEnumerator,
+            MMDeviceEnumerator, eCapture, eCommunications, eRender,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -78,7 +79,7 @@ use windows::{
         },
     },
     core::Result as WinResult,
-    core::{PCWSTR, w},
+    core::{Error, HRESULT, Interface, PCWSTR, Type, w},
 };
 
 #[derive(Serialize)]
@@ -648,6 +649,7 @@ fn run() -> WinResult<()> {
         "lighting-solid" => run_lighting_solid(&args[1..]),
         "lighting-effect" => run_lighting_effect(&args[1..]),
         "lighting-vu-test" => run_lighting_vu_test(&args[1..]),
+        "audio" => run_audio_command(&args[1..])?,
         "config" => run_config_command(&args[1..]),
         "logs" => run_logs_command(&args[1..]),
         "diagnostics" => run_diagnostics_command(&args[1..]),
@@ -696,6 +698,8 @@ Usage:\n\
   hyperx-mic-lite unmute\n\
   hyperx-mic-lite toggle\n\
   hyperx-mic-lite volume 75\n\
+  hyperx-mic-lite audio volume <mic|monitoring|headphone> <0-100>\n\
+  hyperx-mic-lite audio mute <mic|monitoring|headphone> <on|off>\n\
   hyperx-mic-lite lighting-detect\n\
   hyperx-mic-lite lighting-hid-dump\n\
   hyperx-mic-lite hid-monitor [seconds]\n\
@@ -2998,6 +3002,20 @@ impl MicLiteApp {
         }
     }
 
+    fn set_mic_monitoring(&mut self) {
+        match set_audio_control_volume(AudioClassControl::Monitoring, self.mic_monitoring) {
+            Ok(()) => self.status_error = None,
+            Err(error) => self.status_error = Some(error.to_string()),
+        }
+    }
+
+    fn set_headphone_volume(&mut self) {
+        match set_audio_control_volume(AudioClassControl::Headphone, self.headphone_volume) {
+            Ok(()) => self.status_error = None,
+            Err(error) => self.status_error = Some(error.to_string()),
+        }
+    }
+
     fn apply_live_mute_lighting(&mut self, is_live: bool) {
         if let Some(cancel) = &self.lighting_cancel {
             cancel.store(true, Ordering::Relaxed);
@@ -3132,6 +3150,7 @@ impl MicLiteApp {
                             )
                             .changed()
                         {
+                            self.set_mic_monitoring();
                             self.save_config_snapshot();
                         }
                         ui.label(format!("{}", self.mic_monitoring));
@@ -3147,6 +3166,7 @@ impl MicLiteApp {
                             )
                             .changed()
                         {
+                            self.set_headphone_volume();
                             self.save_config_snapshot();
                         }
                         ui.label(format!("{}", self.headphone_volume));
@@ -3537,6 +3557,163 @@ fn set_volume(args: &[String]) -> WinResult<()> {
     Ok(())
 }
 
+fn run_audio_command(args: &[String]) -> WinResult<()> {
+    if args.is_empty() {
+        audio_usage();
+        process::exit(2);
+    }
+
+    match args[0].as_str() {
+        "volume" => {
+            if args.len() != 3 {
+                audio_usage();
+                process::exit(2);
+            }
+            let control = AudioClassControl::parse(&args[1]).unwrap_or_else(|| {
+                eprintln!("Unknown audio control '{}'.", args[1]);
+                audio_usage();
+                process::exit(2);
+            });
+            let percent = parse_percent_arg(&args[2]);
+            set_audio_control_volume(control, percent)?;
+            println!(
+                "{{\"control\":{},\"volume\":{}}}",
+                json_string(control.label()),
+                percent
+            );
+            Ok(())
+        }
+        "mute" => {
+            if args.len() != 3 {
+                audio_usage();
+                process::exit(2);
+            }
+            let control = AudioClassControl::parse(&args[1]).unwrap_or_else(|| {
+                eprintln!("Unknown audio control '{}'.", args[1]);
+                audio_usage();
+                process::exit(2);
+            });
+            let muted = parse_on_off_arg(&args[2]);
+            set_audio_control_mute(control, muted)?;
+            println!(
+                "{{\"control\":{},\"muted\":{}}}",
+                json_string(control.label()),
+                muted
+            );
+            Ok(())
+        }
+        "topology" => {
+            if args.len() != 2 {
+                audio_usage();
+                process::exit(2);
+            }
+            let flow = match args[1].as_str() {
+                "capture" | "mic" | "input" => eCapture,
+                "render" | "headphone" | "output" => eRender,
+                _ => {
+                    audio_usage();
+                    process::exit(2);
+                }
+            };
+            print_audio_topology(flow)?;
+            Ok(())
+        }
+        _ => {
+            audio_usage();
+            process::exit(2);
+        }
+    }
+}
+
+fn audio_usage() {
+    eprintln!(
+        "Usage:\n\
+  hyperx-mic-lite audio volume <mic|monitoring|headphone> <0-100>\n\
+  hyperx-mic-lite audio mute <mic|monitoring|headphone> <on|off>\n\
+  hyperx-mic-lite audio topology <capture|render>"
+    );
+}
+
+fn parse_percent_arg(value: &str) -> u8 {
+    let percent = value.parse::<u8>().unwrap_or_else(|_| {
+        eprintln!("Percent must be a number from 0 to 100.");
+        process::exit(2);
+    });
+    if percent > 100 {
+        eprintln!("Percent must be a number from 0 to 100.");
+        process::exit(2);
+    }
+    percent
+}
+
+fn parse_on_off_arg(value: &str) -> bool {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "muted" => true,
+        "off" | "unmuted" | "live" | "false" | "0" => false,
+        _ => {
+            eprintln!("Mute value must be on/off or true/false.");
+            process::exit(2);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AudioClassControl {
+    Mic,
+    Monitoring,
+    Headphone,
+}
+
+impl AudioClassControl {
+    fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "mic" | "microphone" | "input" => Some(Self::Mic),
+            "monitoring" | "monitor" | "sidetone" => Some(Self::Monitoring),
+            "headphone" | "headphones" | "output" => Some(Self::Headphone),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mic => "mic",
+            Self::Monitoring => "monitoring",
+            Self::Headphone => "headphone",
+        }
+    }
+
+    fn volume_part_id(self) -> u32 {
+        match self {
+            Self::Mic => 0x20008,
+            Self::Monitoring => 0x2000a,
+            Self::Headphone => 0x20006,
+        }
+    }
+
+    fn mute_part_id(self) -> u32 {
+        match self {
+            Self::Mic => 0x20007,
+            Self::Monitoring => 0x20009,
+            Self::Headphone => 0x20005,
+        }
+    }
+
+    fn db_range(self) -> (f32, f32) {
+        match self {
+            Self::Mic => (-8.0, 7.0),
+            Self::Monitoring => (-30.0, 6.0),
+            Self::Headphone => (-40.0, -9.0),
+        }
+    }
+
+    fn endpoint_flow(self) -> windows::Win32::Media::Audio::EDataFlow {
+        match self {
+            Self::Headphone => eRender,
+            Self::Mic | Self::Monitoring => eCapture,
+        }
+    }
+}
+
 fn set_mic_mute(muted: bool) -> WinResult<()> {
     let result =
         unsafe { endpoint_volume(&default_capture_device()?)?.SetMute(muted, std::ptr::null()) };
@@ -3552,6 +3729,15 @@ fn set_mic_volume_percent(percent: u8) -> WinResult<()> {
             .SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())
     };
     if result.is_ok() {
+        if let Err(error) = set_topology_control_volume(AudioClassControl::Mic, percent) {
+            log_event(
+                "warn",
+                "audio.usb_class.volume.mic.error",
+                &[("message", error.to_string())],
+            );
+        }
+    }
+    if result.is_ok() {
         log_event(
             "info",
             "audio.volume.set",
@@ -3559,6 +3745,273 @@ fn set_mic_volume_percent(percent: u8) -> WinResult<()> {
         );
     }
     result
+}
+
+fn set_audio_control_volume(control: AudioClassControl, percent: u8) -> WinResult<()> {
+    match control {
+        AudioClassControl::Mic => set_mic_volume_percent(percent),
+        AudioClassControl::Monitoring => set_topology_control_volume(control, percent),
+        AudioClassControl::Headphone => {
+            if let Ok(device) = hyperx_render_device() {
+                unsafe {
+                    endpoint_volume(&device)?
+                        .SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())?;
+                }
+            }
+            set_topology_control_volume(control, percent)
+        }
+    }?;
+    log_event(
+        "info",
+        "audio.usb_class.volume.set",
+        &[
+            ("control", control.label().to_string()),
+            ("percent", percent.to_string()),
+        ],
+    );
+    Ok(())
+}
+
+fn set_audio_control_mute(control: AudioClassControl, muted: bool) -> WinResult<()> {
+    match control {
+        AudioClassControl::Mic => set_mic_mute(muted),
+        AudioClassControl::Monitoring | AudioClassControl::Headphone => {
+            set_topology_control_mute(control, muted)
+        }
+    }?;
+    log_event(
+        "info",
+        "audio.usb_class.mute.set",
+        &[
+            ("control", control.label().to_string()),
+            ("muted", muted.to_string()),
+        ],
+    );
+    Ok(())
+}
+
+fn set_topology_control_volume(control: AudioClassControl, percent: u8) -> WinResult<()> {
+    let device = hyperx_audio_device(control.endpoint_flow())?;
+    let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None)? };
+    let part = find_topology_part(&topology, control.volume_part_id())?
+        .or_else(|| unsafe { topology.GetPartById(control.volume_part_id()).ok() })
+        .ok_or_else(|| {
+            Error::new(
+                HRESULT(0x80070490u32 as i32),
+                "Topology volume part not found",
+            )
+        })?;
+    let volume = activate_part_interface::<IAudioVolumeLevel>(&part)?;
+    let (captured_min, captured_max) = control.db_range();
+    let mut target = captured_min + (captured_max - captured_min) * percent as f32 / 100.0;
+    unsafe {
+        let channels = volume.GetChannelCount().unwrap_or(2).max(1);
+        let mut min = 0.0f32;
+        let mut max = 0.0f32;
+        let mut stepping = 0.0f32;
+        if volume
+            .GetLevelRange(0, &mut min, &mut max, &mut stepping)
+            .is_ok()
+        {
+            target = target.clamp(min, max);
+        }
+        for channel in 0..channels {
+            volume.SetLevel(channel, target, None)?;
+        }
+    }
+    Ok(())
+}
+
+fn set_topology_control_mute(control: AudioClassControl, muted: bool) -> WinResult<()> {
+    let device = hyperx_audio_device(control.endpoint_flow())?;
+    let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None)? };
+    let part = find_topology_part(&topology, control.mute_part_id())?
+        .or_else(|| unsafe { topology.GetPartById(control.mute_part_id()).ok() })
+        .ok_or_else(|| {
+            Error::new(
+                HRESULT(0x80070490u32 as i32),
+                "Topology mute part not found",
+            )
+        })?;
+    let mute = activate_part_interface::<IAudioMute>(&part)?;
+    unsafe { mute.SetMute(muted, None) }
+}
+
+fn activate_part_interface<T: Interface>(
+    part: &windows::Win32::Media::Audio::IPart,
+) -> WinResult<T> {
+    let mut raw = std::ptr::null_mut();
+    unsafe {
+        part.Activate(CLSCTX_ALL.0 as u32, &T::IID, Some(&mut raw))?;
+        Type::from_abi(raw)
+    }
+}
+
+fn hyperx_render_device() -> WinResult<IMMDevice> {
+    hyperx_audio_device(eRender)
+}
+
+fn hyperx_audio_device(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<IMMDevice> {
+    let enumerator = device_enumerator()?;
+    let collection =
+        unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE(DEVICE_STATEMASK_ALL))? };
+    let count = unsafe { collection.GetCount()? };
+    for index in 0..count {
+        let device = unsafe { collection.Item(index)? };
+        let name = device_name(&device)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if name.contains("hyperx") || name.contains("quadcast") {
+            return Ok(device);
+        }
+    }
+    unsafe { enumerator.GetDefaultAudioEndpoint(flow, eCommunications) }
+}
+
+fn print_audio_topology(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<()> {
+    let device = hyperx_audio_device(flow)?;
+    let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None)? };
+    let device_name = device_name(&device).unwrap_or_else(|_| "Unknown".to_string());
+    println!("Topology for {device_name}");
+    let mut visited = Vec::new();
+    unsafe {
+        let subunit_count = topology.GetSubunitCount()?;
+        for index in 0..subunit_count {
+            let subunit = topology.GetSubunit(index)?;
+            if let Ok(part) = subunit.cast() {
+                print_topology_part(&part, 0, &mut visited)?;
+            }
+        }
+        let connector_count = topology.GetConnectorCount()?;
+        for index in 0..connector_count {
+            let connector = topology.GetConnector(index)?;
+            if let Ok(connected) = connector.GetConnectedTo() {
+                if let Ok(part) = connected.cast() {
+                    print_topology_part(&part, 0, &mut visited)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_topology_part(
+    topology: &IDeviceTopology,
+    id: u32,
+) -> WinResult<Option<windows::Win32::Media::Audio::IPart>> {
+    let mut visited = Vec::new();
+    unsafe {
+        let subunit_count = topology.GetSubunitCount()?;
+        for index in 0..subunit_count {
+            let subunit = topology.GetSubunit(index)?;
+            if let Ok(part) = subunit.cast() {
+                if let Some(found) = find_topology_part_from(&part, id, &mut visited)? {
+                    return Ok(Some(found));
+                }
+            }
+        }
+        let connector_count = topology.GetConnectorCount()?;
+        for index in 0..connector_count {
+            let connector = topology.GetConnector(index)?;
+            if let Ok(connected) = connector.GetConnectedTo() {
+                if let Ok(part) = connected.cast() {
+                    if let Some(found) = find_topology_part_from(&part, id, &mut visited)? {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn find_topology_part_from(
+    part: &windows::Win32::Media::Audio::IPart,
+    id: u32,
+    visited: &mut Vec<u32>,
+) -> WinResult<Option<windows::Win32::Media::Audio::IPart>> {
+    unsafe {
+        let local_id = part.GetLocalId()?;
+        if local_id == id {
+            return Ok(Some(part.clone()));
+        }
+        if visited.contains(&local_id) {
+            return Ok(None);
+        }
+        visited.push(local_id);
+        if let Ok(parts) = part.EnumPartsIncoming() {
+            let count = parts.GetCount().unwrap_or(0);
+            for index in 0..count {
+                if let Ok(child) = parts.GetPart(index) {
+                    if let Some(found) = find_topology_part_from(&child, id, visited)? {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+        }
+        if let Ok(parts) = part.EnumPartsOutgoing() {
+            let count = parts.GetCount().unwrap_or(0);
+            for index in 0..count {
+                if let Ok(child) = parts.GetPart(index) {
+                    if let Some(found) = find_topology_part_from(&child, id, visited)? {
+                        return Ok(Some(found));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn print_topology_part(
+    part: &windows::Win32::Media::Audio::IPart,
+    depth: usize,
+    visited: &mut Vec<u32>,
+) -> WinResult<()> {
+    unsafe {
+        let id = part.GetLocalId()?;
+        if visited.contains(&id) {
+            return Ok(());
+        }
+        visited.push(id);
+        let indent = "  ".repeat(depth);
+        let name = part
+            .GetName()
+            .ok()
+            .and_then(|value| value.to_string().ok())
+            .unwrap_or_default();
+        let subtype = part.GetSubType().ok();
+        println!("{indent}part id=0x{id:02x} name={name} subtype={subtype:?}");
+        let control_count = part.GetControlInterfaceCount().unwrap_or(0);
+        for index in 0..control_count {
+            if let Ok(control) = part.GetControlInterface(index) {
+                let control_name = control
+                    .GetName()
+                    .ok()
+                    .and_then(|value| value.to_string().ok())
+                    .unwrap_or_default();
+                let iid = control.GetIID().ok();
+                println!("{indent}  control name={control_name} iid={iid:?}");
+            }
+        }
+        if let Ok(parts) = part.EnumPartsIncoming() {
+            let count = parts.GetCount().unwrap_or(0);
+            for index in 0..count {
+                if let Ok(child) = parts.GetPart(index) {
+                    print_topology_part(&child, depth + 1, visited)?;
+                }
+            }
+        }
+        if let Ok(parts) = part.EnumPartsOutgoing() {
+            let count = parts.GetCount().unwrap_or(0);
+            for index in 0..count {
+                if let Ok(child) = parts.GetPart(index) {
+                    print_topology_part(&child, depth + 1, visited)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn input_peak_value() -> WinResult<f32> {

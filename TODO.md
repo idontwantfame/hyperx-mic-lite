@@ -41,7 +41,7 @@
 - [x] Capture and document native solid-color lighting writes with USBPcap/Wireshark.
 - [x] Capture and document native mic gain and mode-dial behavior with USBPcap/Wireshark.
 - [x] Capture and document native mic monitoring, headphone volume, mic volume, and toggle USB Audio Class writes.
-- Add USB Audio Class control writes for mic monitoring, headphone volume, mic volume, and their mute toggles.
+- [x] Add USB Audio Class/Core Audio topology writes for mic monitoring, headphone volume, mic volume, and their mute toggles.
 - [x] Capture and document native Wave/VU-style lighting frames and `Save to Microphone`.
 - Expand lighting packet rendering from 2 cells to the native 16-cell frame layout.
 - Add an explicit, experimental `Save to Microphone` action for persistent device lighting writes.
