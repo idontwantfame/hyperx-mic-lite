@@ -6,7 +6,7 @@
 - [x] Add Windows Event Viewer logging for important lifecycle and failure events.
 - Register a proper Event Viewer message source during service/app install so events render friendly messages instead of raw provider records.
 - [x] Add crash/panic capture with a useful report path and enough context to debug failures.
-- Add a CLI command to export a diagnostics bundle with logs, device info, HID report sizes, app version, and recent settings.
+- [x] Add a CLI command to export a diagnostics bundle with logs, device info, HID report sizes, app version, and recent settings.
 - Add a debug/verbose flag for packet-level HID logging during protocol work.
 
 ## Configuration Management
@@ -15,7 +15,7 @@
 - [x] Add CLI commands to dump, export, import, validate, and reset configuration.
 - [x] Add config backup/restore behavior before risky imports or migrations.
 - [x] Add config schema/version migration so older settings can be upgraded safely.
-- Add redaction for diagnostics exports where config may contain local paths or device IDs.
+- [x] Add redaction for diagnostics exports where config may contain local paths or device IDs.
 
 ## Background Service
 

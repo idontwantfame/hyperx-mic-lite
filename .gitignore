@@ -1,5 +1,6 @@
 /target/
 /target-verify/
+/diagnostics-test/
 *.pdb
 *.ilk
 *.exe
