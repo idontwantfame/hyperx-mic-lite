@@ -665,8 +665,8 @@ impl MicLiteApp {
 
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
         let pattern_width = 235.0_f32.min(rect.width() * 0.29).max(205.0);
-        let desired_pattern_left = rect.left() + rect.width() * 0.69;
-        let min_pattern_left = rect.left() + rect.width() * 0.52;
+        let desired_pattern_left = rect.left() + rect.width() * 0.56;
+        let min_pattern_left = rect.left() + rect.width() * 0.44;
         let max_pattern_left = rect.right() - pattern_width - 16.0;
         let pattern_left = desired_pattern_left.clamp(min_pattern_left, max_pattern_left);
         let mic_area_right = pattern_left - 18.0;
