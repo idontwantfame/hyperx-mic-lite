@@ -2162,7 +2162,7 @@ fn run_lighting_vu_test(args: &[String]) {
         .clamp(1, 30);
 
     let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
-    let frame = build_vu_frame(level as f32 / 100.0, config.lighting.brightness);
+    let frame = build_vu_frame(level as f32 / 100.0, config.lighting.brightness, 0);
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(seconds) {
         if let Err(error) = write_lighting_frame_once(frame, packet_log) {
@@ -2542,6 +2542,7 @@ fn stream_lighting_program_cancelable(
     let mut index = 0usize;
     let frame_delay = effect_frame_delay(program.speed);
     let mut vu_level = 0.18f32;
+    let mut vu_tick = 0u32;
     let mut meter_error_logged = false;
     let capture_monitor = if program.effect == Effect::VuMeter {
         match start_audio_peak_monitor() {
@@ -2569,9 +2570,12 @@ fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if program.effect == Effect::VuMeter {
-            let peak = if let Some(monitor) = &capture_monitor {
+            let direct_peak = if let Some(monitor) = &capture_monitor {
                 monitor.peak()
             } else {
+                0.0
+            };
+            let endpoint_peak = if capture_monitor.is_none() {
                 match input_peak_value() {
                     Ok(peak) => peak,
                     Err(error) => {
@@ -2586,10 +2590,13 @@ fn stream_lighting_program_cancelable(
                         0.0
                     }
                 }
+            } else {
+                input_peak_value().unwrap_or(0.0)
             };
-            let target = peak.sqrt().clamp(0.0, 1.0);
+            let target = vu_target_level(direct_peak.max(endpoint_peak));
             vu_level = smooth_vu_level(vu_level, target);
-            build_vu_frame(vu_level, program.brightness)
+            vu_tick = vu_tick.wrapping_add(1);
+            build_vu_frame(vu_level, program.brightness, vu_tick)
         } else {
             let frame = frames[index % frames.len()];
             index += 1;
@@ -2781,36 +2788,58 @@ fn lightning_frames(colors: &[[u8; 3]], speed: u8) -> Vec<LightingFrame> {
 }
 
 fn smooth_vu_level(current: f32, target: f32) -> f32 {
-    let coefficient = if target > current { 0.42 } else { 0.10 };
+    let coefficient = if target > current { 0.58 } else { 0.16 };
     current + (target - current) * coefficient
 }
 
-fn build_vu_frame(level: f32, brightness: u8) -> LightingFrame {
+fn vu_target_level(raw_peak: f32) -> f32 {
+    let normalized = ((raw_peak - 0.0005).max(0.0) * 36.0).clamp(0.0, 1.0);
+    normalized.powf(0.45)
+}
+
+fn build_vu_frame(level: f32, brightness: u8, tick: u32) -> LightingFrame {
     let level = level.clamp(0.0, 1.0);
-    let visible_level = level.max(0.08);
-    let mut frame = solid_frame(scale_color([18, 0, 0], brightness.max(35)));
+    let visible_level = level.max(0.05);
+    let mut frame = solid_frame([0, 0, 0]);
+    for (cell, slot) in frame.iter_mut().enumerate() {
+        let ember = 10 + flame_flicker(cell, tick, 9);
+        *slot = scale_color([ember, 1, 0], brightness.max(30));
+    }
     let lit_cells = ((visible_level * LIGHTING_CELL_COUNT as f32).ceil() as usize)
-        .clamp(3, LIGHTING_CELL_COUNT);
+        .clamp(2, LIGHTING_CELL_COUNT);
     for cell in 0..LIGHTING_CELL_COUNT {
-        let height = (LIGHTING_CELL_COUNT - 1 - cell) as f32 / (LIGHTING_CELL_COUNT - 1) as f32;
         let threshold = cell + 1;
         if threshold <= lit_cells {
-            let energy = (visible_level * 1.35 - height * 0.14).clamp(0.28, 1.0);
-            frame[LIGHTING_CELL_COUNT - 1 - cell] = vu_color(height.max(energy), brightness);
+            let position = if lit_cells <= 1 {
+                0.0
+            } else {
+                cell as f32 / (lit_cells - 1) as f32
+            };
+            let flicker = flame_flicker(cell, tick, 18) as f32 / 100.0;
+            let heat = (position * 0.82 + visible_level * 0.28 + flicker).clamp(0.0, 1.0);
+            frame[LIGHTING_CELL_COUNT - 1 - cell] = vu_color(heat, brightness);
         }
     }
     frame
 }
 
+fn flame_flicker(cell: usize, tick: u32, span: u8) -> u8 {
+    let value = tick
+        .wrapping_mul(5)
+        .wrapping_add((cell as u32).wrapping_mul(11))
+        .wrapping_add(((cell as u32) << 2) ^ tick);
+    (value % (span as u32 + 1)) as u8
+}
+
 fn vu_color(strength: f32, brightness: u8) -> [u8; 3] {
     let base = if strength < 0.35 {
-        lerp_color_float([45, 0, 0], [255, 42, 0], strength / 0.35)
+        lerp_color_float([90, 2, 0], [255, 48, 0], strength / 0.35)
     } else if strength < 0.72 {
-        lerp_color_float([255, 42, 0], [255, 185, 0], (strength - 0.35) / 0.37)
+        lerp_color_float([255, 48, 0], [255, 180, 0], (strength - 0.35) / 0.37)
     } else {
-        lerp_color_float([255, 185, 0], [255, 255, 210], (strength - 0.72) / 0.28)
+        lerp_color_float([255, 180, 0], [255, 255, 190], (strength - 0.72) / 0.28)
     };
-    let effective = ((strength * brightness as f32).round() as u8).clamp(18, 100);
+    let effective = ((0.45 + strength * 0.55) * brightness as f32).round() as u8;
     scale_color(base, effective)
 }
 
