@@ -38,7 +38,7 @@ pub(crate) fn color_swatch(
     color: egui::Color32,
     selected: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
     ui.painter().rect_filled(rect, 0.0, color);
     if selected {
         ui.painter().rect_stroke(

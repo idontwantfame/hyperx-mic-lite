@@ -331,15 +331,25 @@ impl MicLiteApp {
             return;
         }
 
-        let program = LightingProgram {
-            effect: self.lighting.effect,
-            target: self.lighting.target,
-            colors: self
-                .lighting
+        let colors = if self.lighting.effect == Effect::Solid {
+            self.lighting
+                .colors
+                .get(self.lighting.selected_color)
+                .copied()
+                .map(|color| vec![[color.r(), color.g(), color.b()]])
+                .unwrap_or_else(|| vec![[0, 255, 0]])
+        } else {
+            self.lighting
                 .colors
                 .iter()
                 .map(|color| [color.r(), color.g(), color.b()])
-                .collect(),
+                .collect()
+        };
+
+        let program = LightingProgram {
+            effect: self.lighting.effect,
+            target: self.lighting.target,
+            colors,
             speed: self.lighting.speed,
             brightness: self.lighting.brightness,
             shared_peak_bits: if self.lighting.effect == Effect::VuMeter {
@@ -361,6 +371,7 @@ impl MicLiteApp {
 
         if let Some(cancel) = &self.lighting_cancel {
             cancel.store(true, Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(90));
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.lighting_cancel = Some(cancel.clone());
@@ -459,18 +470,6 @@ impl MicLiteApp {
         }
         if ui.button("Open logs in terminal").clicked() {
             self.open_log_terminal();
-            ui.close();
-        }
-        ui.separator();
-        if ui.button("Reset layout").clicked() {
-            self.dashboard_stage_height = 250.0;
-            self.dashboard_audio_width = 285.0;
-            self.dashboard_lighting_width = 590.0;
-            self.dashboard_column_gap = 18.0;
-            self.stage_pattern_left_factor = 0.56;
-            self.stage_pattern_width = 235.0;
-            self.stage_mic_gap = 18.0;
-            self.save_config_snapshot();
             ui.close();
         }
     }
@@ -586,13 +585,16 @@ impl MicLiteApp {
         } else {
             ui.separator();
         }
-        let total_width = ui.available_width();
-        let gap = self.dashboard_column_gap.clamp(0.0, 10.0);
+        let total_width = ui.available_width().min(650.0);
+        let gap = self.dashboard_column_gap.clamp(12.0, 18.0);
         let min_audio = 190.0;
         let min_lighting = 340.0;
         let max_audio = (total_width - gap - min_lighting).max(min_audio);
         ui.horizontal_top(|ui| {
-            self.ui_audio_panel(ui);
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.allocate_ui(egui::vec2(190.0, 320.0), |ui| {
+                self.ui_audio_panel(ui);
+            });
 
             if self.layout_edit {
                 let (split_rect, drag) =
@@ -618,7 +620,7 @@ impl MicLiteApp {
                 ui.add_space(gap);
             }
 
-            self.ui_lighting_panel(ui);
+            self.ui_lighting_panel(ui, gap);
         });
     }
 
@@ -681,12 +683,13 @@ impl MicLiteApp {
         });
     }
 
-    fn ui_lighting_panel(&mut self, ui: &mut egui::Ui) {
+    fn ui_lighting_panel(&mut self, ui: &mut egui::Ui, gap: f32) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.add_space(2.0);
+            ui.spacing_mut().item_spacing.x = 0.0;
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                ui.allocate_ui(egui::vec2(190.0, 340.0), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.allocate_ui(egui::vec2(174.0, 340.0), |ui| {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         section_label(ui, "LIGHTING EFFECTS");
                         ui.add_space(2.0);
@@ -725,8 +728,8 @@ impl MicLiteApp {
                     });
                 });
 
-                ui.add_space(10.0);
-                ui.allocate_ui(egui::vec2(210.0, 340.0), |ui| {
+                ui.add_space(gap);
+                ui.allocate_ui(egui::vec2(196.0, 340.0), |ui| {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         section_label(ui, "COLOR");
                         ui.add_space(6.0);
@@ -782,13 +785,13 @@ impl MicLiteApp {
 
                         ui.add_space(8.0);
                         if ui
-                            .add_sized([200.0, 26.0], egui::Button::new("Apply"))
+                            .add_sized([160.0, 26.0], egui::Button::new("Apply"))
                             .clicked()
                         {
                             self.apply_lighting_to_microphone();
                         }
                         if ui
-                            .add_sized([200.0, 26.0], egui::Button::new("Stop Stream"))
+                            .add_sized([160.0, 26.0], egui::Button::new("Stop Stream"))
                             .clicked()
                         {
                             if let Some(cancel) = &self.lighting_cancel {
@@ -798,7 +801,7 @@ impl MicLiteApp {
                             log_event("info", "lighting.apply.stop", &[]);
                         }
                         if ui
-                            .add_sized([200.0, 26.0], egui::Button::new("Save to Mic"))
+                            .add_sized([160.0, 26.0], egui::Button::new("Save to Mic"))
                             .on_hover_text("Experimental persistent device write")
                             .clicked()
                         {
@@ -816,8 +819,12 @@ impl MicLiteApp {
             section_label(ui, "POLAR PATTERN");
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.small("Last used:");
-                ui.strong(self.polar_pattern.label());
+                ui.label(egui::RichText::new("Last used:").size(12.0));
+                ui.label(
+                    egui::RichText::new(self.polar_pattern.label())
+                        .size(12.0)
+                        .strong(),
+                );
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -955,9 +962,13 @@ impl eframe::App for MicLiteApp {
             log_event("info", "gui.start_minimized", &[]);
         }
         ui.ctx().request_repaint_after(Duration::from_millis(50));
+        let inner_width = (ui.available_width() - 20.0).max(0.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(10.0);
             ui.vertical(|ui| {
+                ui.set_width(inner_width);
+                ui.set_max_width(inner_width);
                 ui.add_space(8.0);
                 self.ui_top_bar(ui);
                 self.ui_layout_editor(ui);
