@@ -1,5 +1,6 @@
 /target/
 /target-verify/
+/target-build/
 /diagnostics-test/
 *.pdb
 *.ilk

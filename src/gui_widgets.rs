@@ -8,10 +8,8 @@ pub(crate) fn section_label(ui: &mut egui::Ui, label: &str) {
 
 pub(crate) fn percent_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> egui::Response {
     ui.horizontal(|ui| {
-        let response = ui.add_sized(
-            [width, 20.0],
-            egui::Slider::new(value, 0..=100).show_value(false),
-        );
+        ui.spacing_mut().slider_width = width;
+        let response = ui.add(egui::Slider::new(value, 0..=100).show_value(false));
         ui.add_sized([34.0, 20.0], egui::Label::new(format!("{}", *value)));
         response
     })
@@ -40,7 +38,7 @@ pub(crate) fn color_swatch(
     color: egui::Color32,
     selected: bool,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 34.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
     ui.painter().rect_filled(rect, 0.0, color);
     if selected {
         ui.painter().rect_stroke(

@@ -12,11 +12,11 @@ use windows::Win32::{
             NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
         },
         WindowsAndMessaging::{
-            AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-            DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, LoadIconW, MF_STRING,
-            MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, TPM_LEFTALIGN,
-            TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-            WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW,
+            AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+            DispatchMessageW, GetCursorPos, GetMessageW, HICON, IDI_APPLICATION, LoadIconW,
+            MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+            TPM_LEFTALIGN, TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+            WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW,
         },
     },
 };
@@ -149,8 +149,73 @@ fn run_tray_message_loop() -> Result<(), String> {
     Ok(())
 }
 
+/// Build a 32x32 microphone tray icon at runtime (no external .ico resource needed).
+/// Transparency comes from the 1bpp AND mask; the 32bpp XOR bitmap carries the colours.
+/// Both bitmaps are stored bottom-up as GDI expects.
+fn create_app_icon() -> Option<HICON> {
+    const SIZE: usize = 32;
+    let mut xor = vec![0u8; SIZE * SIZE * 4];
+    let mut and = vec![0xffu8; (SIZE / 8) * SIZE]; // start fully transparent
+
+    let mut plot = |x: usize, y: usize, r: u8, g: u8, b: u8| {
+        let row = SIZE - 1 - y; // bottom-up
+        let idx = (row * SIZE + x) * 4;
+        xor[idx] = b;
+        xor[idx + 1] = g;
+        xor[idx + 2] = r;
+        xor[idx + 3] = 255;
+        let byte = row * (SIZE / 8) + x / 8;
+        and[byte] &= !(0x80u8 >> (x % 8)); // clear mask bit => opaque pixel
+    };
+
+    let rounded = |x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, rad: f32| {
+        if x < x0 || x > x1 || y < y0 || y > y1 {
+            return false;
+        }
+        let cxl = x0 as f32 + rad;
+        let cxr = x1 as f32 - rad;
+        let cyt = y0 as f32 + rad;
+        let cyb = y1 as f32 - rad;
+        let dx = (cxl - x as f32).max(0.0).max(x as f32 - cxr);
+        let dy = (cyt - y as f32).max(0.0).max(y as f32 - cyb);
+        dx * dx + dy * dy <= rad * rad + 0.5
+    };
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            if rounded(x, y, 11, 3, 20, 19, 4.5) {
+                // Capsule: vertical gradient from red to pink (matches the lighting theme).
+                let t = ((y as f32 - 3.0) / 16.0).clamp(0.0, 1.0);
+                let g = (32.0 * (1.0 - t)) as u8;
+                let b = (16.0 + 138.0 * t) as u8;
+                plot(x, y, 255, g, b);
+            } else if (15..=16).contains(&x) && (19..=24).contains(&y) {
+                plot(x, y, 210, 214, 218); // stem
+            } else if rounded(x, y, 9, 25, 22, 27, 2.0) {
+                plot(x, y, 210, 214, 218); // base
+            }
+        }
+    }
+
+    unsafe {
+        CreateIcon(
+            None,
+            SIZE as i32,
+            SIZE as i32,
+            1,
+            32,
+            and.as_ptr(),
+            xor.as_ptr(),
+        )
+    }
+    .ok()
+}
+
 fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
-    let icon = unsafe { LoadIconW(None, IDI_APPLICATION).map_err(|error| error.to_string())? };
+    let icon = match create_app_icon() {
+        Some(icon) => icon,
+        None => unsafe { LoadIconW(None, IDI_APPLICATION).map_err(|error| error.to_string())? },
+    };
     let mut data = NOTIFYICONDATAW {
         cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,

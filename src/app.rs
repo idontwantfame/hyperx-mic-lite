@@ -140,8 +140,8 @@ pub(crate) fn run_gui(args: &[String]) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("HyperX Mic Lite")
-            .with_inner_size([980.0, 640.0])
-            .with_min_inner_size([820.0, 540.0]),
+            .with_inner_size([670.0, 730.0])
+            .with_min_inner_size([640.0, 600.0]),
         ..Default::default()
     };
 

@@ -47,13 +47,13 @@ fn diagnostics_usage() {
     eprintln!("Usage:\n  hyperx-mic-lite diagnostics export [directory]");
 }
 
-fn default_diagnostics_dir() -> PathBuf {
+pub(crate) fn default_diagnostics_dir() -> PathBuf {
     app_data_dir()
         .join("diagnostics")
         .join(format!("diagnostics-{}", unix_timestamp_seconds()))
 }
 
-fn export_diagnostics_bundle(destination: &Path) -> Result<(), String> {
+pub(crate) fn export_diagnostics_bundle(destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination)
         .map_err(|error| format!("{}: {error}", destination.display()))?;
 

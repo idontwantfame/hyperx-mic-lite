@@ -620,7 +620,14 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
     thread::spawn(move || {
         let api = match hidapi::HidApi::new() {
             Ok(api) => api,
-            Err(_) => return,
+            Err(error) => {
+                log_event(
+                    "error",
+                    "hid.listener.init.error",
+                    &[("message", error.to_string())],
+                );
+                return;
+            }
         };
 
         let mut devices = Vec::new();
@@ -628,29 +635,81 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
             .device_list()
             .filter(|device| is_supported_lighting_device(device))
         {
-            if info.usage_page() != 0xffff || info.usage() != 0x0001 {
-                continue;
-            }
-            if let Ok(device) = api.open_path(info.path()) {
-                let _ = device.set_blocking_mode(false);
-                devices.push(device);
+            match api.open_path(info.path()) {
+                Ok(device) => {
+                    if let Err(error) = device.set_blocking_mode(false) {
+                        log_event(
+                            "warn",
+                            "hid.listener.nonblocking.error",
+                            &[
+                                ("interface", info.interface_number().to_string()),
+                                ("usage_page", format!("{:04x}", info.usage_page())),
+                                ("usage", format!("{:04x}", info.usage())),
+                                ("message", error.to_string()),
+                            ],
+                        );
+                    }
+                    log_event(
+                        "info",
+                        "hid.listener.open",
+                        &[
+                            ("interface", info.interface_number().to_string()),
+                            ("usage_page", format!("{:04x}", info.usage_page())),
+                            ("usage", format!("{:04x}", info.usage())),
+                        ],
+                    );
+                    devices.push(device);
+                }
+                Err(error) => {
+                    log_event(
+                        "warn",
+                        "hid.listener.open.error",
+                        &[
+                            ("interface", info.interface_number().to_string()),
+                            ("usage_page", format!("{:04x}", info.usage_page())),
+                            ("usage", format!("{:04x}", info.usage())),
+                            ("message", error.to_string()),
+                        ],
+                    );
+                }
             }
         }
 
-        let mut buffer = [0u8; 65];
+        if devices.is_empty() {
+            log_event("warn", "hid.listener.no_devices", &[]);
+            return;
+        }
+
+        let mut buffers = vec![[0u8; 65]; devices.len()];
         loop {
-            for device in &devices {
-                if let Ok(count) = device.read_timeout(&mut buffer, 50) {
-                    if count > 0 {
-                        match decode_hid_event(&buffer[..count]) {
-                            Some(HidEvent::Mute(is_live)) => {
-                                let _ = sender.send(HidEvent::Mute(is_live));
-                            }
-                            Some(HidEvent::Pattern(pattern)) => {
-                                let _ = sender.send(HidEvent::Pattern(pattern));
-                            }
-                            None => {}
+            for (index, device) in devices.iter().enumerate() {
+                match device.read_timeout(&mut buffers[index], 10) {
+                    Ok(0) => {}
+                    Ok(count) => match decode_hid_event(&buffers[index][..count]) {
+                        Some(HidEvent::Mute(is_live)) => {
+                            log_event(
+                                "info",
+                                "hid.listener.event.mute",
+                                &[("live", is_live.to_string())],
+                            );
+                            let _ = sender.send(HidEvent::Mute(is_live));
                         }
+                        Some(HidEvent::Pattern(pattern)) => {
+                            log_event(
+                                "info",
+                                "hid.listener.event.pattern",
+                                &[("pattern", pattern.label().to_string())],
+                            );
+                            let _ = sender.send(HidEvent::Pattern(pattern));
+                        }
+                        None => {}
+                    },
+                    Err(error) => {
+                        log_event(
+                            "warn",
+                            "hid.listener.read.error",
+                            &[("message", error.to_string())],
+                        );
                     }
                 }
             }
@@ -661,10 +720,20 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
 }
 
 fn decode_hid_event(report: &[u8]) -> Option<HidEvent> {
-    match report {
+    match hid_event_payload(report)? {
         [0x05, 0x10, value, ..] => Some(HidEvent::Mute(*value == 1)),
         [0x05, 0x11, value, ..] => Some(HidEvent::Pattern(PolarPattern::from_report(*value))),
         _ => None,
+    }
+}
+
+fn hid_event_payload(report: &[u8]) -> Option<&[u8]> {
+    if matches!(report, [0x05, 0x10 | 0x11, ..]) {
+        Some(report)
+    } else if matches!(report, [_, 0x05, 0x10 | 0x11, ..]) {
+        Some(&report[1..])
+    } else {
+        None
     }
 }
 
