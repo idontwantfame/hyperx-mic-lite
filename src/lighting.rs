@@ -911,6 +911,7 @@ pub(crate) fn stream_lighting_program_cancelable(
             index += 1;
             frame
         };
+        let frame = apply_light_target(frame, program.target);
         send_feature_packet(&device, &header, packet_log)?;
         send_feature_packet(&device, &build_frame_packet(frame), packet_log)?;
         thread::sleep(frame_delay);
@@ -937,6 +938,26 @@ fn build_frame_packet(frame: LightingFrame) -> [u8; 64] {
         packet[offset + 3] = color[2];
     }
     packet
+}
+
+fn apply_light_target(mut frame: LightingFrame, target: LightTarget) -> LightingFrame {
+    match target {
+        LightTarget::All => frame,
+        LightTarget::Top => {
+            frame[1] = [0, 0, 0];
+            for color in frame.iter_mut().skip(2) {
+                *color = [0, 0, 0];
+            }
+            frame
+        }
+        LightTarget::Bottom => {
+            frame[0] = [0, 0, 0];
+            for color in frame.iter_mut().skip(2) {
+                *color = [0, 0, 0];
+            }
+            frame
+        }
+    }
 }
 
 fn build_save_prepare_packet() -> [u8; 64] {
