@@ -2380,6 +2380,21 @@ fn stream_lighting_program_cancelable(
     cancel: Option<Arc<AtomicBool>>,
     packet_log: bool,
 ) -> Result<(), String> {
+    let _com = if program.effect == Effect::VuMeter {
+        match ComApartment::init() {
+            Ok(com) => Some(com),
+            Err(error) => {
+                log_event(
+                    "warn",
+                    "lighting.vu.com_init.error",
+                    &[("message", error.to_string())],
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
     let info = api
         .device_list()
@@ -2400,6 +2415,7 @@ fn stream_lighting_program_cancelable(
     let mut index = 0usize;
     let frame_delay = effect_frame_delay(program.speed);
     let mut vu_level = 0.18f32;
+    let mut meter_error_logged = false;
 
     while match duration {
         StreamDuration::Timed(duration) => started.elapsed() < duration,
@@ -2412,7 +2428,21 @@ fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if program.effect == Effect::VuMeter {
-            let target = input_peak_value().unwrap_or(0.0).sqrt().clamp(0.0, 1.0);
+            let peak = match input_peak_value() {
+                Ok(peak) => peak,
+                Err(error) => {
+                    if !meter_error_logged {
+                        log_event(
+                            "warn",
+                            "lighting.vu.meter.error",
+                            &[("message", error.to_string())],
+                        );
+                        meter_error_logged = true;
+                    }
+                    0.0
+                }
+            };
+            let target = peak.sqrt().clamp(0.0, 1.0);
             vu_level = smooth_vu_level(vu_level, target);
             build_vu_frame(vu_level, program.brightness)
         } else {
