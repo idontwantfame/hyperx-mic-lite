@@ -38,4 +38,5 @@
 - [x] Add packet builders for Wave, Cycle, Pulse, Blink, Lightning, and VU Meter.
 - [x] Smooth the VU Meter lighting effect with attack/release timing and better bottom-to-top flame gradients(need to be flame colour too).
 - [x] Add live/muted lighting behavior that follows HID mute reports.
-- Do a guided USBPcap + Wireshark capture session together to inspect what the original HyperX software sends for mic monitoring, headphone volume, lighting effects, and any hidden gain/dial controls.
+- [x] Capture and document native solid-color lighting writes with USBPcap/Wireshark.
+- Capture native mic monitoring, headphone volume, VU Meter, Wave, and any hidden gain/dial controls with USBPcap/Wireshark.
