@@ -274,6 +274,9 @@ struct LightingProgram {
     brightness: u8,
 }
 
+const LIGHTING_CELL_COUNT: usize = 16;
+type LightingFrame = [[u8; 3]; LIGHTING_CELL_COUNT];
+
 #[derive(Clone, Copy)]
 enum StreamDuration {
     Timed(Duration),
@@ -2529,29 +2532,28 @@ fn build_display_header_packet() -> [u8; 64] {
     packet
 }
 
-fn build_frame_packet(frame: [[u8; 3]; 2]) -> [u8; 64] {
+fn build_frame_packet(frame: LightingFrame) -> [u8; 64] {
     let mut packet = [0u8; 64];
-    packet[0] = 0x81;
-    packet[1] = frame[0][0];
-    packet[2] = frame[0][1];
-    packet[3] = frame[0][2];
-    packet[4] = 0x81;
-    packet[5] = frame[1][0];
-    packet[6] = frame[1][1];
-    packet[7] = frame[1][2];
+    for (index, color) in frame.iter().enumerate() {
+        let offset = index * 4;
+        packet[offset] = 0x81;
+        packet[offset + 1] = color[0];
+        packet[offset + 2] = color[1];
+        packet[offset + 3] = color[2];
+    }
     packet
 }
 
-fn build_effect_frames(program: &LightingProgram) -> Vec<[[u8; 3]; 2]> {
+fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
     let colors = normalized_colors(program);
     match program.effect {
-        Effect::Solid => vec![[colors[0], colors[0]]],
+        Effect::Solid => vec![solid_frame(colors[0])],
         Effect::Cycle => cycle_frames(&colors, program.speed, false),
         Effect::Wave => cycle_frames(&colors, program.speed, true),
         Effect::Pulse => pulse_frames(&colors, program.speed),
         Effect::Blink => blink_frames(&colors, program.speed),
         Effect::Lightning => lightning_frames(&colors, program.speed),
-        Effect::VuMeter => vec![[[0, 0, 0], [0, 0, 0]]],
+        Effect::VuMeter => vec![solid_frame([0, 0, 0])],
     }
 }
 
@@ -2577,7 +2579,11 @@ fn transition_steps(speed: u8, min: usize, max: usize) -> usize {
     max.saturating_sub((span * speed as usize) / 100).max(min)
 }
 
-fn cycle_frames(colors: &[[u8; 3]], speed: u8, wave: bool) -> Vec<[[u8; 3]; 2]> {
+fn solid_frame(color: [u8; 3]) -> LightingFrame {
+    [color; LIGHTING_CELL_COUNT]
+}
+
+fn cycle_frames(colors: &[[u8; 3]], speed: u8, wave: bool) -> Vec<LightingFrame> {
     let steps = transition_steps(speed, 8, 48);
     let mut sequence = Vec::new();
     for index in 0..colors.len() {
@@ -2589,64 +2595,74 @@ fn cycle_frames(colors: &[[u8; 3]], speed: u8, wave: bool) -> Vec<[[u8; 3]; 2]> 
     }
 
     if sequence.is_empty() {
-        return vec![[[0, 0, 0], [0, 0, 0]]];
+        return vec![solid_frame([0, 0, 0])];
     }
 
-    let phase = if wave { sequence.len() / 3 } else { 0 };
+    let wave_span = (sequence.len() / 2).max(1);
     sequence
         .iter()
         .enumerate()
-        .map(|(index, upper)| {
-            let lower = sequence[(index + phase) % sequence.len()];
-            [*upper, lower]
+        .map(|(index, color)| {
+            let mut frame = solid_frame(*color);
+            if wave {
+                for (cell, slot) in frame.iter_mut().enumerate() {
+                    let offset = (cell * wave_span) / LIGHTING_CELL_COUNT;
+                    *slot = sequence[(index + offset) % sequence.len()];
+                }
+            }
+            frame
         })
         .collect()
 }
 
-fn pulse_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
+fn pulse_frames(colors: &[[u8; 3]], speed: u8) -> Vec<LightingFrame> {
     let steps = transition_steps(speed, 6, 36);
     let mut frames = Vec::new();
     for &color in colors {
         for step in 0..steps {
             let value = lerp_color([0, 0, 0], color, step, steps);
-            frames.push([value, value]);
+            frames.push(solid_frame(value));
         }
         for step in 0..steps {
             let value = lerp_color(color, [0, 0, 0], step, steps);
-            frames.push([value, value]);
+            frames.push(solid_frame(value));
         }
     }
     frames
 }
 
-fn blink_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
+fn blink_frames(colors: &[[u8; 3]], speed: u8) -> Vec<LightingFrame> {
     let lit = transition_steps(speed, 2, 16);
     let dark = transition_steps(speed, 2, 24);
     let mut frames = Vec::new();
     for &color in colors {
         for _ in 0..lit {
-            frames.push([color, color]);
+            frames.push(solid_frame(color));
         }
         for _ in 0..dark {
-            frames.push([[0, 0, 0], [0, 0, 0]]);
+            frames.push(solid_frame([0, 0, 0]));
         }
     }
     frames
 }
 
-fn lightning_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
+fn lightning_frames(colors: &[[u8; 3]], speed: u8) -> Vec<LightingFrame> {
     let flash = transition_steps(speed, 1, 6);
     let fade = transition_steps(speed, 8, 42);
     let mut frames = Vec::new();
     for &color in colors {
         for _ in 0..flash {
-            frames.push([color, [0, 0, 0]]);
+            let mut frame = solid_frame([0, 0, 0]);
+            for cell in (0..LIGHTING_CELL_COUNT).step_by(3) {
+                frame[cell] = color;
+            }
+            frames.push(frame);
         }
         for step in 0..fade {
             let value = lerp_color(color, [0, 0, 0], step, fade);
-            frames.push([value, value]);
+            frames.push(solid_frame(value));
         }
-        frames.push([[0, 0, 0], [0, 0, 0]]);
+        frames.push(solid_frame([0, 0, 0]));
     }
     frames
 }
@@ -2656,17 +2672,20 @@ fn smooth_vu_level(current: f32, target: f32) -> f32 {
     current + (target - current) * coefficient
 }
 
-fn build_vu_frame(level: f32, brightness: u8) -> [[u8; 3]; 2] {
+fn build_vu_frame(level: f32, brightness: u8) -> LightingFrame {
     let level = level.clamp(0.0, 1.0);
-    let lower_strength = (0.24 + level * 0.92).clamp(0.24, 1.0);
-    let upper_strength = ((level - 0.22) * 1.35).clamp(0.0, 1.0);
-    let lower = vu_color(lower_strength, brightness);
-    let upper = if upper_strength <= 0.08 {
-        [0, 0, 0]
-    } else {
-        vu_color(upper_strength.max(0.30), brightness)
-    };
-    [upper, lower]
+    let mut frame = solid_frame([0, 0, 0]);
+    let lit_cells =
+        ((level * LIGHTING_CELL_COUNT as f32).ceil() as usize).clamp(1, LIGHTING_CELL_COUNT);
+    for cell in 0..LIGHTING_CELL_COUNT {
+        let height = (LIGHTING_CELL_COUNT - 1 - cell) as f32 / (LIGHTING_CELL_COUNT - 1) as f32;
+        let threshold = cell + 1;
+        if threshold <= lit_cells {
+            let energy = (level * 1.25 - height * 0.18).clamp(0.20, 1.0);
+            frame[LIGHTING_CELL_COUNT - 1 - cell] = vu_color(height.max(energy), brightness);
+        }
+    }
+    frame
 }
 
 fn vu_color(strength: f32, brightness: u8) -> [u8; 3] {
@@ -2777,10 +2796,10 @@ fn write_solid_lighting_once(
     packet_log: bool,
 ) -> Result<(), String> {
     let color = scale_color(color, brightness);
-    write_lighting_frame_once([color, color], packet_log)
+    write_lighting_frame_once(solid_frame(color), packet_log)
 }
 
-fn write_lighting_frame_once(frame: [[u8; 3]; 2], packet_log: bool) -> Result<(), String> {
+fn write_lighting_frame_once(frame: LightingFrame, packet_log: bool) -> Result<(), String> {
     let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
     let info = api
         .device_list()

@@ -5,3 +5,4 @@
 *.ilk
 *.exe
 x.json
+captures/*.pcapng
