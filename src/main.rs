@@ -2592,7 +2592,7 @@ fn stream_lighting_program_cancelable(
             } else {
                 0.0
             };
-            let endpoint_peak = if capture_monitor.is_none() {
+            let endpoint_peak = if program.shared_peak_bits.is_none() {
                 match input_peak_value() {
                     Ok(peak) => peak,
                     Err(error) => {
@@ -2608,7 +2608,7 @@ fn stream_lighting_program_cancelable(
                     }
                 }
             } else {
-                input_peak_value().unwrap_or(0.0)
+                0.0
             };
             let target = vu_target_level(direct_peak.max(endpoint_peak));
             vu_level = smooth_vu_level(vu_level, target);
@@ -2822,14 +2822,14 @@ fn smooth_vu_level(current: f32, target: f32) -> f32 {
 }
 
 fn vu_target_level(raw_peak: f32) -> f32 {
-    let normalized = ((raw_peak - 0.0008).max(0.0) * 22.0).clamp(0.0, 1.0);
-    normalized.powf(0.62)
+    let normalized = ((raw_peak - 0.0003).max(0.0) * 85.0).clamp(0.0, 1.0);
+    normalized.powf(0.70)
 }
 
 fn build_vu_frame(level: f32, brightness: u8, tick: u32) -> LightingFrame {
     let level = level.clamp(0.0, 1.0);
-    let visible_level = level.max(0.10);
-    let flame_height = 0.34 + visible_level * 0.66;
+    let visible_level = level.max(0.04);
+    let flame_height = 0.16 + visible_level * 0.80;
     let mut frame = solid_frame([0, 0, 0]);
     for (cell, slot) in frame.iter_mut().enumerate() {
         let height = cell as f32 / (LIGHTING_CELL_COUNT - 1) as f32;
