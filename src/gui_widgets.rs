@@ -39,15 +39,11 @@ pub(crate) fn color_swatch(
     selected: bool,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-    let fill_rect = rect.shrink(1.0);
-    ui.painter().rect_filled(fill_rect, 0.0, color);
+    let center = rect.center();
+    ui.painter().circle_filled(center, 11.0, color);
     if selected {
-        ui.painter().rect_stroke(
-            rect.shrink(0.5),
-            0.0,
-            egui::Stroke::new(1.0, egui::Color32::WHITE),
-            egui::StrokeKind::Inside,
-        );
+        ui.painter()
+            .circle_stroke(center, 13.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
     }
     response
 }
