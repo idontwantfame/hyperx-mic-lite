@@ -3691,7 +3691,7 @@ impl MicLiteApp {
         self.refresh_status_periodic();
         self.refresh_input_peak();
         ui.horizontal(|ui| {
-            let pattern_width = 238.0;
+            let pattern_width = 210.0;
             let gap = 12.0;
             let stage_width = (ui.available_width() - pattern_width - gap).max(420.0);
             ui.allocate_ui(egui::vec2(stage_width, 250.0), |ui| {
@@ -3703,9 +3703,14 @@ impl MicLiteApp {
             });
         });
         ui.separator();
-        ui.columns(2, |columns| {
-            columns[0].vertical(|ui| self.ui_audio_panel(ui));
-            columns[1].vertical(|ui| self.ui_lighting_panel(ui));
+        ui.horizontal(|ui| {
+            ui.allocate_ui(egui::vec2(300.0, ui.available_height()), |ui| {
+                self.ui_audio_panel(ui);
+            });
+            ui.add_space(18.0);
+            ui.allocate_ui(egui::vec2(530.0, ui.available_height()), |ui| {
+                self.ui_lighting_panel(ui);
+            });
         });
     }
 
@@ -3786,8 +3791,8 @@ impl MicLiteApp {
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 section_label(ui, "LIGHTING");
-                ui.columns(2, |columns| {
-                    columns[0].vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.allocate_ui(egui::vec2(115.0, 185.0), |ui| {
                         section_label(ui, "EFFECTS");
                         for effect in [
                             Effect::Wave,
@@ -3808,7 +3813,8 @@ impl MicLiteApp {
                         }
                     });
 
-                    columns[1].vertical(|ui| {
+                    ui.add_space(12.0);
+                    ui.allocate_ui(egui::vec2(340.0, 185.0), |ui| {
                         section_label(ui, "TARGET");
                         let mut target_changed = false;
                         ui.horizontal(|ui| {
@@ -3910,16 +3916,22 @@ impl MicLiteApp {
     }
 
     fn ui_pattern_panel(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(220.0);
+        ui.set_min_width(190.0);
         section_label(ui, "POLAR PATTERN");
         ui.vertical(|ui| {
             pattern_tile(ui, PolarPattern::Stereo, self.polar_pattern);
             pattern_tile(ui, PolarPattern::Omni, self.polar_pattern);
             pattern_tile(ui, PolarPattern::Cardioid, self.polar_pattern);
-            pattern_tile(ui, PolarPattern::Bidirectional, self.polar_pattern);
+            ui.horizontal(|ui| {
+                pattern_tile(ui, PolarPattern::Bidirectional, self.polar_pattern);
+                ui.vertical(|ui| {
+                    ui.add_space(8.0);
+                    ui.small("Last used");
+                    ui.strong(self.polar_pattern.label());
+                });
+            });
         });
-        ui.add_space(8.0);
-        ui.label(format!("Last used: {}", self.polar_pattern.label()));
+        ui.add_space(6.0);
         ui.label(pattern_description(self.polar_pattern));
     }
 
