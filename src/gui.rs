@@ -55,10 +55,14 @@ pub(crate) struct MicLiteApp {
     tray_handle: Option<TrayHandle>,
     start_minimized: bool,
     start_minimized_applied: bool,
+    layout_edit: bool,
+    stage_pattern_left_factor: f32,
+    stage_pattern_width: f32,
+    stage_mic_gap: f32,
 }
 
 impl MicLiteApp {
-    pub(crate) fn new(start_minimized: bool) -> Self {
+    pub(crate) fn new(start_minimized: bool, layout_edit: bool) -> Self {
         let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
         let colors = config
             .lighting
@@ -124,6 +128,10 @@ impl MicLiteApp {
             },
             start_minimized,
             start_minimized_applied: false,
+            layout_edit,
+            stage_pattern_left_factor: config.ui.stage_pattern_left_factor,
+            stage_pattern_width: config.ui.stage_pattern_width,
+            stage_mic_gap: config.ui.stage_mic_gap,
         };
         app.refresh_status();
         if app.mute_on_app_start {
@@ -176,6 +184,9 @@ impl MicLiteApp {
                 window_height: 760.0,
                 minimize_to_tray: self.minimize_to_tray,
                 last_polar_pattern: self.polar_pattern.as_config().to_string(),
+                stage_pattern_left_factor: self.stage_pattern_left_factor,
+                stage_pattern_width: self.stage_pattern_width,
+                stage_mic_gap: self.stage_mic_gap,
             },
             service: load_or_create_config()
                 .map(|config| config.service)
@@ -406,7 +417,52 @@ impl MicLiteApp {
                         &[("enabled", self.minimize_to_tray.to_string())],
                     );
                 }
+                if self.layout_edit {
+                    ui.label(egui::RichText::new("Layout edit").color(egui::Color32::YELLOW));
+                }
             });
+        });
+    }
+
+    fn ui_layout_editor(&mut self, ui: &mut egui::Ui) {
+        if !self.layout_edit {
+            return;
+        }
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            section_label(ui, "LAYOUT");
+            let mut changed = false;
+            ui.label("polar x");
+            changed |= ui
+                .add(egui::Slider::new(
+                    &mut self.stage_pattern_left_factor,
+                    0.20..=0.82,
+                ))
+                .changed();
+            ui.label("width");
+            changed |= ui
+                .add(egui::Slider::new(
+                    &mut self.stage_pattern_width,
+                    180.0..=340.0,
+                ))
+                .changed();
+            ui.label("mic gap");
+            changed |= ui
+                .add(egui::Slider::new(&mut self.stage_mic_gap, 0.0..=80.0))
+                .changed();
+            ui.monospace(format!(
+                "x={:.3} width={:.0} gap={:.0}",
+                self.stage_pattern_left_factor, self.stage_pattern_width, self.stage_mic_gap
+            ));
+            if ui.button("Reset").clicked() {
+                self.stage_pattern_left_factor = 0.56;
+                self.stage_pattern_width = 235.0;
+                self.stage_mic_gap = 18.0;
+                changed = true;
+            }
+            if changed {
+                self.save_config_snapshot();
+            }
         });
     }
 
@@ -664,12 +720,16 @@ impl MicLiteApp {
         let painter = ui.painter_at(rect);
 
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
-        let pattern_width = 235.0_f32.min(rect.width() * 0.29).max(205.0);
-        let desired_pattern_left = rect.left() + rect.width() * 0.56;
+        let pattern_width = self
+            .stage_pattern_width
+            .clamp(180.0, 340.0)
+            .min(rect.width() * 0.42);
+        let desired_pattern_left =
+            rect.left() + rect.width() * self.stage_pattern_left_factor.clamp(0.20, 0.82);
         let min_pattern_left = rect.left() + rect.width() * 0.44;
         let max_pattern_left = rect.right() - pattern_width - 16.0;
         let pattern_left = desired_pattern_left.clamp(min_pattern_left, max_pattern_left);
-        let mic_area_right = pattern_left - 18.0;
+        let mic_area_right = pattern_left - self.stage_mic_gap.clamp(0.0, 80.0);
         let center = egui::pos2((rect.left() + mic_area_right) * 0.5, rect.center().y);
         let glow_radius = rect.height() * 0.36;
         for (index, color) in self.lighting.colors.iter().enumerate() {
@@ -705,6 +765,25 @@ impl MicLiteApp {
             egui::pos2(pattern_left, rect.top() + 10.0),
             egui::pos2(pattern_left + pattern_width, rect.bottom() - 10.0),
         );
+        if self.layout_edit {
+            let drag_response = ui.interact(
+                pattern_rect,
+                ui.id().with("stage_pattern_panel_drag"),
+                egui::Sense::drag(),
+            );
+            if drag_response.dragged() {
+                self.stage_pattern_left_factor = (self.stage_pattern_left_factor
+                    + drag_response.drag_delta().x / rect.width())
+                .clamp(0.20, 0.82);
+                self.save_config_snapshot();
+            }
+            painter.rect_stroke(
+                pattern_rect.expand(3.0),
+                0.0,
+                egui::Stroke::new(1.0, egui::Color32::YELLOW),
+                egui::StrokeKind::Outside,
+            );
+        }
         ui.scope_builder(egui::UiBuilder::new().max_rect(pattern_rect), |ui| {
             self.ui_pattern_panel(ui);
         });
@@ -767,6 +846,7 @@ impl eframe::App for MicLiteApp {
             ui.vertical(|ui| {
                 ui.add_space(8.0);
                 self.ui_top_bar(ui);
+                self.ui_layout_editor(ui);
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);

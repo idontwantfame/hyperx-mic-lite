@@ -120,7 +120,7 @@ Usage:\n\
   hyperx-mic-lite eventlog <register|unregister|status>\n\
   hyperx-mic-lite service <install|uninstall|start|stop|status|run>\n\
   hyperx-mic-lite startup <install|uninstall|status>\n\
-  hyperx-mic-lite gui [--start-minimized]"
+  hyperx-mic-lite gui [--start-minimized] [--layout-edit]"
     );
 }
 
@@ -128,11 +128,12 @@ pub(crate) fn run_gui(args: &[String]) {
     let start_minimized = args
         .iter()
         .any(|arg| arg == "--start-minimized" || arg == "--minimized");
+    let layout_edit = args.iter().any(|arg| arg == "--layout-edit");
     if args
         .iter()
-        .any(|arg| arg != "--start-minimized" && arg != "--minimized")
+        .any(|arg| arg != "--start-minimized" && arg != "--minimized" && arg != "--layout-edit")
     {
-        eprintln!("Usage: hyperx-mic-lite gui [--start-minimized]");
+        eprintln!("Usage: hyperx-mic-lite gui [--start-minimized] [--layout-edit]");
         process::exit(2);
     }
     log_event("info", "gui.start", &[]);
@@ -149,7 +150,7 @@ pub(crate) fn run_gui(args: &[String]) {
         options,
         Box::new(|context| {
             context.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(MicLiteApp::new(start_minimized)))
+            Ok(Box::new(MicLiteApp::new(start_minimized, layout_edit)))
         }),
     );
 

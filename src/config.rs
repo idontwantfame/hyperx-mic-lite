@@ -21,6 +21,18 @@ fn default_last_polar_pattern() -> String {
     "unknown".to_string()
 }
 
+fn default_stage_pattern_left_factor() -> f32 {
+    0.56
+}
+
+fn default_stage_pattern_width() -> f32 {
+    235.0
+}
+
+fn default_stage_mic_gap() -> f32 {
+    18.0
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct AppConfig {
     pub(crate) schema_version: u32,
@@ -61,6 +73,12 @@ pub(crate) struct UiConfig {
     pub(crate) minimize_to_tray: bool,
     #[serde(default = "default_last_polar_pattern")]
     pub(crate) last_polar_pattern: String,
+    #[serde(default = "default_stage_pattern_left_factor")]
+    pub(crate) stage_pattern_left_factor: f32,
+    #[serde(default = "default_stage_pattern_width")]
+    pub(crate) stage_pattern_width: f32,
+    #[serde(default = "default_stage_mic_gap")]
+    pub(crate) stage_mic_gap: f32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -114,6 +132,9 @@ impl Default for AppConfig {
                 window_height: 760.0,
                 minimize_to_tray: true,
                 last_polar_pattern: "unknown".to_string(),
+                stage_pattern_left_factor: default_stage_pattern_left_factor(),
+                stage_pattern_width: default_stage_pattern_width(),
+                stage_mic_gap: default_stage_mic_gap(),
             },
             service: ServiceConfig {
                 enabled: false,
@@ -169,6 +190,15 @@ impl AppConfig {
         }
         if self.ui.window_width < 640.0 || self.ui.window_height < 480.0 {
             return Err("ui.window_width/window_height are too small.".to_string());
+        }
+        if !(0.20..=0.82).contains(&self.ui.stage_pattern_left_factor) {
+            return Err("ui.stage_pattern_left_factor must be 0.20..0.82.".to_string());
+        }
+        if !(180.0..=340.0).contains(&self.ui.stage_pattern_width) {
+            return Err("ui.stage_pattern_width must be 180..340.".to_string());
+        }
+        if !(0.0..=80.0).contains(&self.ui.stage_mic_gap) {
+            return Err("ui.stage_mic_gap must be 0..80.".to_string());
         }
         Ok(())
     }
