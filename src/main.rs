@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,7 +12,7 @@ use std::{
     process,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver},
     },
     thread,
@@ -301,6 +302,17 @@ struct ServiceHealth {
     restore_on_startup: bool,
     last_restore: Option<String>,
     last_error: Option<String>,
+}
+
+struct AudioPeakMonitor {
+    peak_bits: Arc<AtomicU32>,
+    _stream: cpal::Stream,
+}
+
+impl AudioPeakMonitor {
+    fn peak(&self) -> f32 {
+        f32::from_bits(self.peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+    }
 }
 
 struct MicLiteApp {
@@ -2155,18 +2167,38 @@ fn run_level_monitor(args: &[String]) {
         .unwrap_or(15)
         .clamp(1, 120);
 
+    let capture_monitor = match start_audio_peak_monitor() {
+        Ok(monitor) => {
+            println!("Using direct input capture peak monitor.");
+            Some(monitor)
+        }
+        Err(error) => {
+            println!("Direct input capture unavailable: {error}");
+            println!("Falling back to Windows endpoint meter.");
+            None
+        }
+    };
+
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(seconds) {
-        match input_peak_value() {
-            Ok(peak) => println!(
+        if let Some(monitor) = &capture_monitor {
+            println!(
                 "{:>6}ms input-peak={:.3}",
                 started.elapsed().as_millis(),
-                peak
-            ),
-            Err(error) => println!(
-                "{:>6}ms input-peak-error={error}",
-                started.elapsed().as_millis()
-            ),
+                monitor.peak()
+            );
+        } else {
+            match input_peak_value() {
+                Ok(peak) => println!(
+                    "{:>6}ms endpoint-peak={:.3}",
+                    started.elapsed().as_millis(),
+                    peak
+                ),
+                Err(error) => println!(
+                    "{:>6}ms endpoint-peak-error={error}",
+                    started.elapsed().as_millis()
+                ),
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -2416,6 +2448,20 @@ fn stream_lighting_program_cancelable(
     let frame_delay = effect_frame_delay(program.speed);
     let mut vu_level = 0.18f32;
     let mut meter_error_logged = false;
+    let capture_monitor = if program.effect == Effect::VuMeter {
+        match start_audio_peak_monitor() {
+            Ok(monitor) => {
+                log_event("info", "lighting.vu.capture.start", &[]);
+                Some(monitor)
+            }
+            Err(error) => {
+                log_event("warn", "lighting.vu.capture.error", &[("message", error)]);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     while match duration {
         StreamDuration::Timed(duration) => started.elapsed() < duration,
@@ -2428,18 +2474,22 @@ fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if program.effect == Effect::VuMeter {
-            let peak = match input_peak_value() {
-                Ok(peak) => peak,
-                Err(error) => {
-                    if !meter_error_logged {
-                        log_event(
-                            "warn",
-                            "lighting.vu.meter.error",
-                            &[("message", error.to_string())],
-                        );
-                        meter_error_logged = true;
+            let peak = if let Some(monitor) = &capture_monitor {
+                monitor.peak()
+            } else {
+                match input_peak_value() {
+                    Ok(peak) => peak,
+                    Err(error) => {
+                        if !meter_error_logged {
+                            log_event(
+                                "warn",
+                                "lighting.vu.meter.error",
+                                &[("message", error.to_string())],
+                            );
+                            meter_error_logged = true;
+                        }
+                        0.0
                     }
-                    0.0
                 }
             };
             let target = peak.sqrt().clamp(0.0, 1.0);
@@ -3465,6 +3515,161 @@ fn input_peak_value() -> WinResult<f32> {
     let device = default_capture_device()?;
     let meter = endpoint_meter(&device)?;
     unsafe { meter.GetPeakValue() }
+}
+
+fn start_audio_peak_monitor() -> Result<AudioPeakMonitor, String> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "No default input device is available.".to_string())?;
+    let config = device
+        .default_input_config()
+        .map_err(|error| error.to_string())?;
+    let channels = config.channels() as usize;
+    let stream_config: cpal::StreamConfig = config.clone().into();
+    let peak_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => {
+            build_peak_stream::<f32>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::F64 => {
+            build_peak_stream::<f64>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::I8 => {
+            build_peak_stream::<i8>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::I16 => {
+            build_peak_stream::<i16>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::I32 => {
+            build_peak_stream::<i32>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::I64 => {
+            build_peak_stream::<i64>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::U8 => {
+            build_peak_stream::<u8>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::U16 => {
+            build_peak_stream::<u16>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::U32 => {
+            build_peak_stream::<u32>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        cpal::SampleFormat::U64 => {
+            build_peak_stream::<u64>(&device, stream_config.clone(), channels, peak_bits.clone())
+        }
+        other => Err(format!("Unsupported input sample format: {other:?}")),
+    }?;
+    stream.play().map_err(|error| error.to_string())?;
+    Ok(AudioPeakMonitor {
+        peak_bits,
+        _stream: stream,
+    })
+}
+
+fn build_peak_stream<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    channels: usize,
+    peak_bits: Arc<AtomicU32>,
+) -> Result<cpal::Stream, String>
+where
+    T: cpal::Sample + cpal::SizedSample + ToPeakSample + Send + 'static,
+{
+    device
+        .build_input_stream(
+            config,
+            move |data: &[T], _| update_peak_from_samples(data, channels, &peak_bits),
+            |error| {
+                log_event(
+                    "warn",
+                    "audio.capture.stream.error",
+                    &[("message", error.to_string())],
+                );
+            },
+            None,
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn update_peak_from_samples<T>(data: &[T], channels: usize, peak_bits: &AtomicU32)
+where
+    T: ToPeakSample,
+{
+    let step = channels.max(1);
+    let peak = data
+        .chunks(step)
+        .flat_map(|frame| frame.iter())
+        .map(|sample| sample.to_peak_sample().abs())
+        .fold(0.0f32, f32::max)
+        .clamp(0.0, 1.0);
+    peak_bits.store(peak.to_bits(), Ordering::Relaxed);
+}
+
+trait ToPeakSample {
+    fn to_peak_sample(&self) -> f32;
+}
+
+impl ToPeakSample for f32 {
+    fn to_peak_sample(&self) -> f32 {
+        *self
+    }
+}
+
+impl ToPeakSample for f64 {
+    fn to_peak_sample(&self) -> f32 {
+        *self as f32
+    }
+}
+
+impl ToPeakSample for i8 {
+    fn to_peak_sample(&self) -> f32 {
+        *self as f32 / i8::MAX as f32
+    }
+}
+
+impl ToPeakSample for i16 {
+    fn to_peak_sample(&self) -> f32 {
+        *self as f32 / i16::MAX as f32
+    }
+}
+
+impl ToPeakSample for i32 {
+    fn to_peak_sample(&self) -> f32 {
+        *self as f32 / i32::MAX as f32
+    }
+}
+
+impl ToPeakSample for i64 {
+    fn to_peak_sample(&self) -> f32 {
+        *self as f32 / i64::MAX as f32
+    }
+}
+
+impl ToPeakSample for u8 {
+    fn to_peak_sample(&self) -> f32 {
+        (*self as f32 - 128.0) / 128.0
+    }
+}
+
+impl ToPeakSample for u16 {
+    fn to_peak_sample(&self) -> f32 {
+        (*self as f32 - 32768.0) / 32768.0
+    }
+}
+
+impl ToPeakSample for u32 {
+    fn to_peak_sample(&self) -> f32 {
+        (*self as f32 - 2147483648.0) / 2147483648.0
+    }
+}
+
+impl ToPeakSample for u64 {
+    fn to_peak_sample(&self) -> f32 {
+        (*self as f64 - 9223372036854775808.0) as f32 / 9223372036854775808.0_f32
+    }
 }
 
 fn mic_status() -> WinResult<MicStatus> {
