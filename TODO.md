@@ -45,4 +45,6 @@
 - [x] Capture and document native Wave/VU-style lighting frames and `Save to Microphone`.
 - Expand lighting packet rendering from 2 cells to the native 16-cell frame layout.
 - Add an explicit, experimental `Save to Microphone` action for persistent device lighting writes.
-- Capture any remaining hidden controls with USBPcap/Wireshark.
+- [x] Capture and document live/muted lighting, save-solid, reset-default, and startup-only behavior.
+- Keep persistent device writes explicit; do not auto-save lighting or live/muted policy during normal Apply.
+- Do not implement reset-default until the command is isolated more safely.
