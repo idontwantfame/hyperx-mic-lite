@@ -2787,14 +2787,15 @@ fn smooth_vu_level(current: f32, target: f32) -> f32 {
 
 fn build_vu_frame(level: f32, brightness: u8) -> LightingFrame {
     let level = level.clamp(0.0, 1.0);
-    let mut frame = solid_frame([0, 0, 0]);
-    let lit_cells =
-        ((level * LIGHTING_CELL_COUNT as f32).ceil() as usize).clamp(1, LIGHTING_CELL_COUNT);
+    let visible_level = level.max(0.08);
+    let mut frame = solid_frame(scale_color([18, 0, 0], brightness.max(35)));
+    let lit_cells = ((visible_level * LIGHTING_CELL_COUNT as f32).ceil() as usize)
+        .clamp(3, LIGHTING_CELL_COUNT);
     for cell in 0..LIGHTING_CELL_COUNT {
         let height = (LIGHTING_CELL_COUNT - 1 - cell) as f32 / (LIGHTING_CELL_COUNT - 1) as f32;
         let threshold = cell + 1;
         if threshold <= lit_cells {
-            let energy = (level * 1.25 - height * 0.18).clamp(0.20, 1.0);
+            let energy = (visible_level * 1.35 - height * 0.14).clamp(0.28, 1.0);
             frame[LIGHTING_CELL_COUNT - 1 - cell] = vu_color(height.max(energy), brightness);
         }
     }
