@@ -39,4 +39,5 @@
 - [x] Smooth the VU Meter lighting effect with attack/release timing and better bottom-to-top flame gradients(need to be flame colour too).
 - [x] Add live/muted lighting behavior that follows HID mute reports.
 - [x] Capture and document native solid-color lighting writes with USBPcap/Wireshark.
-- Capture native mic monitoring, headphone volume, VU Meter, Wave, and any hidden gain/dial controls with USBPcap/Wireshark.
+- [x] Capture and document native mic gain and mode-dial behavior with USBPcap/Wireshark.
+- Capture native mic monitoring, VU Meter, Wave, and any hidden controls with USBPcap/Wireshark.
