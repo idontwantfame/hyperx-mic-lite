@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "audio": {
+    "mic_volume": 100,
+    "mic_monitoring": 71,
+    "headphone_volume": 35,
+    "mute_on_app_start": false
+  },
+  "lighting": {
+    "effect": "wave",
+    "target": "bottom",
+    "colors": [
+      "#ff2010",
+      "#ff009a",
+      "#5d18ff",
+      "#00a2ff",
+      "#00edbf",
+      "#38ee3d",
+      "#ffea20"
+    ],
+    "selected_color": 5,
+    "opacity": 100,
+    "speed": 75,
+    "brightness": 100,
+    "live_when_muted": true
+  },
+  "ui": {
+    "selected_tab": "lights",
+    "window_width": 1120.0,
+    "window_height": 760.0,
+    "minimize_to_tray": true,
+    "last_polar_pattern": "stereo",
+    "stage_pattern_left_factor": 0.56,
+    "stage_pattern_width": 235.0,
+    "stage_mic_gap": 18.0,
+    "dashboard_stage_height": 250.0,
+    "dashboard_audio_width": 285.0,
+    "dashboard_lighting_width": 590.0,
+    "dashboard_column_gap": 18.0
+  },
+  "service": {
+    "enabled": false,
+    "restore_on_startup": false,
+    "owns_startup_restore": true,
+    "owns_lighting_loop": false,
+    "owns_hid_monitoring": false,
+    "owns_tray_handoff": false
+  },
+  "device": {
+    "preferred_capture_endpoint_id": null,
+    "lighting_vendor_id": 2385,
+    "lighting_product_id": 5919
+  }
+}

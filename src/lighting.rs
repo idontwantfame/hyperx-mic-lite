@@ -36,6 +36,9 @@ use crate::{
 pub(crate) struct LightingState {
     pub(crate) effect: Effect,
     pub(crate) target: LightTarget,
+    pub(crate) split_layers: bool,
+    pub(crate) top_effect: Effect,
+    pub(crate) bottom_effect: Effect,
     pub(crate) colors: Vec<egui::Color32>,
     pub(crate) selected_color: usize,
     pub(crate) opacity: u8,
@@ -48,6 +51,9 @@ pub(crate) struct LightingState {
 pub(crate) struct LightingProgram {
     pub(crate) effect: Effect,
     pub(crate) target: LightTarget,
+    pub(crate) split_layers: bool,
+    pub(crate) top_effect: Effect,
+    pub(crate) bottom_effect: Effect,
     pub(crate) colors: Vec<[u8; 3]>,
     pub(crate) speed: u8,
     pub(crate) brightness: u8,
@@ -264,6 +270,9 @@ pub(crate) fn run_lighting_solid(args: &[String]) {
     let program = LightingProgram {
         effect: Effect::Solid,
         target: LightTarget::All,
+        split_layers: false,
+        top_effect: Effect::Solid,
+        bottom_effect: Effect::Solid,
         colors: vec![color],
         speed: 75,
         brightness: 100,
@@ -333,6 +342,9 @@ pub(crate) fn run_lighting_effect(args: &[String]) {
     let program = LightingProgram {
         effect,
         target: LightTarget::from_config(&config.lighting.target),
+        split_layers: config.lighting.split_layers,
+        top_effect: Effect::from_config(&config.lighting.top_effect),
+        bottom_effect: Effect::from_config(&config.lighting.bottom_effect),
         colors: if colors.is_empty() {
             vec![[0, 255, 0]]
         } else {
@@ -798,7 +810,12 @@ pub(crate) fn stream_lighting_program_cancelable(
     cancel: Option<Arc<AtomicBool>>,
     packet_log: bool,
 ) -> Result<(), String> {
-    let _com = if program.effect == Effect::VuMeter {
+    let active_effect = if program.split_layers {
+        None
+    } else {
+        Some(program.effect)
+    };
+    let _com = if active_effect == Some(Effect::VuMeter) {
         match ComApartment::init() {
             Ok(com) => Some(com),
             Err(error) => {
@@ -825,9 +842,26 @@ pub(crate) fn stream_lighting_program_cancelable(
         .map_err(|error| error.to_string())?;
 
     let header = build_display_header_packet();
-    let frames = build_effect_frames(program);
-    if frames.is_empty() {
+    let frames = if program.split_layers {
+        Vec::new()
+    } else {
+        build_effect_frames(program.effect, program)
+    };
+    if !program.split_layers && frames.is_empty() {
         return Err("No lighting frames were generated.".to_string());
+    }
+    let top_frames = if program.split_layers {
+        build_effect_frames(program.top_effect, program)
+    } else {
+        Vec::new()
+    };
+    let bottom_frames = if program.split_layers {
+        build_effect_frames(program.bottom_effect, program)
+    } else {
+        Vec::new()
+    };
+    if program.split_layers && (top_frames.is_empty() || bottom_frames.is_empty()) {
+        return Err("No layered lighting frames were generated.".to_string());
     }
     let started = std::time::Instant::now();
     let mut index = 0usize;
@@ -835,24 +869,24 @@ pub(crate) fn stream_lighting_program_cancelable(
     let mut vu_level = 0.18f32;
     let mut vu_tick = 0u32;
     let mut meter_error_logged = false;
-    let capture_monitor = if program.effect == Effect::VuMeter && program.shared_peak_bits.is_none()
-    {
-        match start_audio_peak_monitor() {
-            Ok(monitor) => {
-                log_event("info", "lighting.vu.capture.start", &[]);
-                Some(monitor)
+    let capture_monitor =
+        if active_effect == Some(Effect::VuMeter) && program.shared_peak_bits.is_none() {
+            match start_audio_peak_monitor() {
+                Ok(monitor) => {
+                    log_event("info", "lighting.vu.capture.start", &[]);
+                    Some(monitor)
+                }
+                Err(error) => {
+                    log_event("warn", "lighting.vu.capture.error", &[("message", error)]);
+                    None
+                }
             }
-            Err(error) => {
-                log_event("warn", "lighting.vu.capture.error", &[("message", error)]);
-                None
+        } else {
+            if active_effect == Some(Effect::VuMeter) {
+                log_event("info", "lighting.vu.capture.shared", &[]);
             }
-        }
-    } else {
-        if program.effect == Effect::VuMeter {
-            log_event("info", "lighting.vu.capture.shared", &[]);
-        }
-        None
-    };
+            None
+        };
 
     while match duration {
         StreamDuration::Timed(duration) => started.elapsed() < duration,
@@ -864,7 +898,7 @@ pub(crate) fn stream_lighting_program_cancelable(
         {
             break;
         }
-        let frame = if program.effect == Effect::VuMeter {
+        let frame = if active_effect == Some(Effect::VuMeter) {
             let direct_peak = if let Some(peak_bits) = &program.shared_peak_bits {
                 peak_from_bits(peak_bits)
             } else if let Some(monitor) = &capture_monitor {
@@ -906,12 +940,21 @@ pub(crate) fn stream_lighting_program_cancelable(
                 );
             }
             build_vu_frame(vu_level, program.brightness, vu_tick)
+        } else if program.split_layers {
+            let top = top_frames[index % top_frames.len()];
+            let bottom = bottom_frames[index % bottom_frames.len()];
+            index += 1;
+            combine_zone_frames(top, bottom)
         } else {
             let frame = frames[index % frames.len()];
             index += 1;
             frame
         };
-        let frame = apply_light_target(frame, program.target);
+        let frame = if program.split_layers {
+            frame
+        } else {
+            apply_light_target(frame, program.target)
+        };
         send_feature_packet(&device, &header, packet_log)?;
         send_feature_packet(&device, &build_frame_packet(frame), packet_log)?;
         thread::sleep(frame_delay);
@@ -960,6 +1003,13 @@ fn apply_light_target(mut frame: LightingFrame, target: LightTarget) -> Lighting
     }
 }
 
+fn combine_zone_frames(top: LightingFrame, bottom: LightingFrame) -> LightingFrame {
+    let mut frame = [[0, 0, 0]; LIGHTING_CELL_COUNT];
+    frame[0] = top[0];
+    frame[1] = bottom[0];
+    frame
+}
+
 fn build_save_prepare_packet() -> [u8; 64] {
     let mut packet = [0u8; 64];
     packet[0] = 0x04;
@@ -994,9 +1044,9 @@ fn build_save_sentinel_packet() -> [u8; 64] {
     packet
 }
 
-fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
+fn build_effect_frames(effect: Effect, program: &LightingProgram) -> Vec<LightingFrame> {
     let colors = normalized_colors(program);
-    match program.effect {
+    match effect {
         Effect::Solid => vec![solid_frame(colors[0])],
         Effect::Cycle => cycle_frames(&colors, program.speed, false),
         Effect::Wave => cycle_frames(&colors, program.speed, true),

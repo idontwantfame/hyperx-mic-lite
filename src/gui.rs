@@ -67,6 +67,9 @@ pub(crate) struct MicLiteApp {
     dashboard_audio_width: f32,
     dashboard_lighting_width: f32,
     dashboard_column_gap: f32,
+    window_x: Option<f32>,
+    window_y: Option<f32>,
+    last_window_position_save: Instant,
 }
 
 impl MicLiteApp {
@@ -106,6 +109,9 @@ impl MicLiteApp {
             lighting: LightingState {
                 effect: Effect::from_config(&config.lighting.effect),
                 target: LightTarget::from_config(&config.lighting.target),
+                split_layers: config.lighting.split_layers,
+                top_effect: Effect::from_config(&config.lighting.top_effect),
+                bottom_effect: Effect::from_config(&config.lighting.bottom_effect),
                 colors: if colors.is_empty() {
                     AppConfig::default()
                         .lighting
@@ -144,6 +150,9 @@ impl MicLiteApp {
             dashboard_audio_width: config.ui.dashboard_audio_width,
             dashboard_lighting_width: config.ui.dashboard_lighting_width,
             dashboard_column_gap: config.ui.dashboard_column_gap,
+            window_x: config.ui.window_x,
+            window_y: config.ui.window_y,
+            last_window_position_save: Instant::now(),
         };
         app.refresh_status();
         if app.mute_on_app_start {
@@ -167,6 +176,9 @@ impl MicLiteApp {
             lighting: LightingConfig {
                 effect: self.lighting.effect.as_config().to_string(),
                 target: self.lighting.target.as_config().to_string(),
+                split_layers: self.lighting.split_layers,
+                top_effect: self.lighting.top_effect.as_config().to_string(),
+                bottom_effect: self.lighting.bottom_effect.as_config().to_string(),
                 colors: self
                     .lighting
                     .colors
@@ -183,6 +195,8 @@ impl MicLiteApp {
                 selected_tab: self.tab.as_config().to_string(),
                 window_width: 1120.0,
                 window_height: 760.0,
+                window_x: self.window_x,
+                window_y: self.window_y,
                 minimize_to_tray: self.minimize_to_tray,
                 last_polar_pattern: self.polar_pattern.as_config().to_string(),
                 stage_pattern_left_factor: self.stage_pattern_left_factor,
@@ -215,6 +229,32 @@ impl MicLiteApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         log_event("info", "gui.restore_from_tray", &[]);
+    }
+
+    fn remember_window_position(&mut self, ctx: &egui::Context) {
+        if self.hidden_to_tray || self.last_window_position_save.elapsed() < Duration::from_secs(2)
+        {
+            return;
+        }
+
+        let position = ctx.input(|input| input.viewport().outer_rect.map(|rect| rect.left_top()));
+        let Some(position) = position else {
+            return;
+        };
+        if !position.x.is_finite() || !position.y.is_finite() {
+            return;
+        }
+
+        let changed = match (self.window_x, self.window_y) {
+            (Some(x), Some(y)) => (x - position.x).abs() >= 1.0 || (y - position.y).abs() >= 1.0,
+            _ => true,
+        };
+        self.last_window_position_save = Instant::now();
+        if changed {
+            self.window_x = Some(position.x);
+            self.window_y = Some(position.y);
+            self.save_config_snapshot();
+        }
     }
 
     fn drain_hid_events(&mut self) {
@@ -349,6 +389,9 @@ impl MicLiteApp {
         let program = LightingProgram {
             effect: self.lighting.effect,
             target: self.lighting.target,
+            split_layers: self.lighting.split_layers,
+            top_effect: self.lighting.top_effect,
+            bottom_effect: self.lighting.bottom_effect,
             colors,
             speed: self.lighting.speed,
             brightness: self.lighting.brightness,
@@ -366,6 +409,12 @@ impl MicLiteApp {
             &[
                 ("effect", program.effect.as_config().to_string()),
                 ("target", program.target.as_config().to_string()),
+                ("split_layers", program.split_layers.to_string()),
+                ("top_effect", program.top_effect.as_config().to_string()),
+                (
+                    "bottom_effect",
+                    program.bottom_effect.as_config().to_string(),
+                ),
             ],
         );
 
@@ -725,6 +774,18 @@ impl MicLiteApp {
                         if target_changed {
                             self.save_config_snapshot();
                         }
+
+                        ui.add_space(10.0);
+                        if ui
+                            .checkbox(&mut self.lighting.split_layers, "Split top/bottom")
+                            .changed()
+                        {
+                            self.save_config_snapshot();
+                        }
+                        if self.lighting.split_layers {
+                            self.ui_layer_effect_picker(ui, "Top", true);
+                            self.ui_layer_effect_picker(ui, "Bottom", false);
+                        }
                     });
                 });
 
@@ -826,16 +887,55 @@ impl MicLiteApp {
         });
     }
 
+    fn ui_layer_effect_picker(&mut self, ui: &mut egui::Ui, label: &str, top: bool) {
+        let mut value = if top {
+            self.lighting.top_effect
+        } else {
+            self.lighting.bottom_effect
+        };
+        ui.horizontal(|ui| {
+            ui.add_sized([46.0, 20.0], egui::Label::new(label));
+            egui::ComboBox::from_id_salt(("layer_effect", label))
+                .selected_text(value.label())
+                .width(92.0)
+                .show_ui(ui, |ui| {
+                    for effect in [
+                        Effect::Solid,
+                        Effect::Wave,
+                        Effect::Cycle,
+                        Effect::Pulse,
+                        Effect::Blink,
+                        Effect::Lightning,
+                    ] {
+                        ui.selectable_value(&mut value, effect, effect.label());
+                    }
+                });
+        });
+        if top && value != self.lighting.top_effect {
+            self.lighting.top_effect = value;
+            self.save_config_snapshot();
+        } else if !top && value != self.lighting.bottom_effect {
+            self.lighting.bottom_effect = value;
+            self.save_config_snapshot();
+        }
+    }
+
     fn ui_pattern_panel(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(230.0);
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
             section_label(ui, "POLAR PATTERN");
             ui.add_space(4.0);
+            let last_used_color = egui::Color32::from_rgb(180, 184, 188);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Last used:").size(12.0));
+                ui.label(
+                    egui::RichText::new("Last used:")
+                        .size(12.0)
+                        .color(last_used_color),
+                );
                 ui.label(
                     egui::RichText::new(self.polar_pattern.label())
                         .size(12.0)
+                        .color(last_used_color)
                         .strong(),
                 );
             });
@@ -992,5 +1092,6 @@ impl eframe::App for MicLiteApp {
             });
             ui.add_space(10.0);
         });
+        self.remember_window_position(&ctx);
     }
 }

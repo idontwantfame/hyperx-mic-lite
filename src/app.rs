@@ -9,6 +9,7 @@ use crate::{
         set_mic_mute, set_volume, toggle_mic_mute,
     },
     com::ComApartment,
+    config::{AppConfig, load_or_create_config},
     config_cli::run_config_command,
     diagnostics::run_diagnostics_command,
     eventlog::run_eventlog_command,
@@ -137,13 +138,18 @@ pub(crate) fn run_gui(args: &[String]) {
         process::exit(2);
     }
     log_event("info", "gui.start", &[]);
+    let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("HyperX Mic Lite")
+        .with_inner_size([670.0, 650.0])
+        .with_min_inner_size([670.0, 650.0])
+        .with_max_inner_size([670.0, 650.0])
+        .with_resizable(false);
+    if let (Some(x), Some(y)) = (config.ui.window_x, config.ui.window_y) {
+        viewport = viewport.with_position([x, y]);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("HyperX Mic Lite")
-            .with_inner_size([670.0, 650.0])
-            .with_min_inner_size([670.0, 650.0])
-            .with_max_inner_size([670.0, 650.0])
-            .with_resizable(false),
+        viewport,
         ..Default::default()
     };
 

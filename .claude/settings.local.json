@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk wc *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk read *)",
+      "Bash(rtk git *)",
+      "Bash(rustup target *)",
+      "Bash(rtk cargo *)",
+      "Bash(rtk ls *)",
+      "Bash(pacman -Q rust rustup)"
+    ]
+  }
+}
