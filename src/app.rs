@@ -1,4 +1,4 @@
-use std::{env, process};
+use std::{env, io::IsTerminal, process};
 
 use eframe::egui;
 use windows::core::Result as WinResult;
@@ -41,13 +41,18 @@ pub fn run_app() {
 fn run() -> WinResult<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        usage();
-        process::exit(2);
+        if running_from_terminal() {
+            startup_info();
+        }
+        let _com = ComApartment::init()?;
+        run_gui(&[]);
+        return Ok(());
     }
 
     let _com = ComApartment::init()?;
 
     match args[0].as_str() {
+        "help" | "--help" | "-h" => usage(),
         "list" => print_devices_json(&list_capture_devices()?),
         "status" => print_status_json(&mic_status()?),
         "lighting-detect" => print_lighting_detection(),
@@ -95,10 +100,32 @@ fn run() -> WinResult<()> {
     Ok(())
 }
 
+fn running_from_terminal() -> bool {
+    std::io::stdout().is_terminal() || std::io::stderr().is_terminal()
+}
+
+fn startup_info() {
+    eprintln!(
+        "Starting HyperX Mic Lite GUI.\n\n\
+Useful command-line options:\n\
+  hyperx-mic-lite status                         Show current microphone state as JSON\n\
+  hyperx-mic-lite mute | unmute | toggle         Control microphone mute\n\
+  hyperx-mic-lite volume 75                      Set microphone volume\n\
+  hyperx-mic-lite lighting-detect                Detect the lighting HID interface\n\
+  hyperx-mic-lite lighting-effect wave forever   Run a lighting effect from the terminal\n\
+  hyperx-mic-lite config dump                    Print saved app configuration\n\
+  hyperx-mic-lite diagnostics export             Create a diagnostic bundle\n\
+  hyperx-mic-lite service status                 Show background service status\n\
+  hyperx-mic-lite gui --start-minimized          Start GUI hidden/minimized\n\n\
+Run `hyperx-mic-lite help` to show the full command list.\n"
+    );
+}
+
 fn usage() {
     eprintln!(
         "hyperx-mic-lite controls the default Windows microphone.\n\n\
 Usage:\n\
+  hyperx-mic-lite\n\
   hyperx-mic-lite list\n\
   hyperx-mic-lite status\n\
   hyperx-mic-lite mute\n\
