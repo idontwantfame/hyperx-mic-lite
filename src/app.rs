@@ -1,11 +1,10 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
-use serde::{Deserialize, Serialize};
 use std::{
     env,
     ffi::{CStr, OsString},
     fs::{self, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     mem,
     path::{Path, PathBuf},
     process,
@@ -32,22 +31,22 @@ use winreg::{
     enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ},
 };
 
-const CONFIG_SCHEMA_VERSION: u32 = 1;
-const APP_NAME: &str = "HyperXMicLite";
-const SERVICE_NAME: &str = "HyperXMicLite";
-const SERVICE_DISPLAY_NAME: &str = "HyperX Mic Lite";
-const SERVICE_DESCRIPTION: &str =
-    "Restores HyperX Mic Lite microphone settings and hosts background device tasks.";
-const STARTUP_VALUE_NAME: &str = "HyperXMicLite";
-const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const EVENTLOG_SOURCE_PATH: &str =
-    r"SYSTEM\CurrentControlSet\Services\EventLog\Application\HyperXMicLite";
-const EVENTLOG_TYPES_SUPPORTED: u32 = 0x0007;
-const EVENTLOG_MESSAGE_ID: u32 = 0x40000001;
-const TRAY_UID: u32 = 1;
+use crate::{
+    config::{
+        AppConfig, AudioConfig, LightingConfig, UiConfig, export_config, import_config,
+        load_or_create_config, reset_config, save_config, validate_config_file,
+    },
+    constants::*,
+    logging::{install_panic_hook, json_string, log_event, log_timestamp},
+    model::{
+        DeviceInfo, Effect, HidEvent, LightTarget, LightingDevice, MicStatus, PolarPattern,
+        ServiceHealth, Tab,
+    },
+    paths::{app_data_dir, config_path, log_file_path, service_health_path},
+    time::unix_timestamp_seconds,
+};
+
 const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 17;
-const TRAY_MENU_OPEN: usize = 1001;
-const TRAY_MENU_EXIT: usize = 1002;
 static TRAY_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TRAY_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -78,10 +77,6 @@ use windows::{
                 CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
                 CoUninitialize, STGM_READ,
             },
-            EventLog::{
-                DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
-                EVENTLOG_WARNING_TYPE, RegisterEventSourceW, ReportEventW,
-            },
             LibraryLoader::GetModuleHandleW,
         },
         UI::{
@@ -100,254 +95,8 @@ use windows::{
         },
     },
     core::Result as WinResult,
-    core::{Error, HRESULT, Interface, PCWSTR, Type, w},
+    core::{Error, HRESULT, Interface, PCWSTR, Type},
 };
-
-#[derive(Serialize)]
-struct DeviceInfo {
-    id: String,
-    name: String,
-    state: String,
-    is_default: bool,
-}
-
-#[derive(Serialize)]
-struct MicStatus {
-    device: DeviceInfo,
-    volume: u8,
-    muted: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PolarPattern {
-    Stereo,
-    Omni,
-    Cardioid,
-    Bidirectional,
-    Unknown(u8),
-}
-
-impl PolarPattern {
-    fn from_report(value: u8) -> Self {
-        match value {
-            0 => Self::Stereo,
-            1 => Self::Omni,
-            2 => Self::Cardioid,
-            3 => Self::Bidirectional,
-            other => Self::Unknown(other),
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Stereo => "Stereo",
-            Self::Omni => "Omni",
-            Self::Cardioid => "Cardioid",
-            Self::Bidirectional => "Bidirectional",
-            Self::Unknown(_) => "Unknown",
-        }
-    }
-
-    fn from_config(value: &str) -> Self {
-        match value {
-            "stereo" => Self::Stereo,
-            "omni" => Self::Omni,
-            "cardioid" => Self::Cardioid,
-            "bidirectional" => Self::Bidirectional,
-            _ => Self::Unknown(255),
-        }
-    }
-
-    fn as_config(self) -> &'static str {
-        match self {
-            Self::Stereo => "stereo",
-            Self::Omni => "omni",
-            Self::Cardioid => "cardioid",
-            Self::Bidirectional => "bidirectional",
-            Self::Unknown(_) => "unknown",
-        }
-    }
-}
-
-enum HidEvent {
-    Mute(bool),
-    Pattern(PolarPattern),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Audio,
-    Lights,
-}
-
-impl Tab {
-    fn from_config(value: &str) -> Self {
-        match value {
-            "lights" => Self::Lights,
-            _ => Self::Audio,
-        }
-    }
-
-    fn as_config(self) -> &'static str {
-        match self {
-            Self::Audio => "audio",
-            Self::Lights => "lights",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Effect {
-    Wave,
-    Solid,
-    Cycle,
-    Pulse,
-    Blink,
-    Lightning,
-    VuMeter,
-}
-
-impl Effect {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Wave => "Wave",
-            Self::Solid => "Solid",
-            Self::Cycle => "Cycle",
-            Self::Pulse => "Pulse",
-            Self::Blink => "Blink",
-            Self::Lightning => "Lightning",
-            Self::VuMeter => "VU Meter",
-        }
-    }
-
-    fn from_config(value: &str) -> Self {
-        match value {
-            "solid" => Self::Solid,
-            "cycle" => Self::Cycle,
-            "pulse" => Self::Pulse,
-            "blink" => Self::Blink,
-            "lightning" => Self::Lightning,
-            "vu_meter" => Self::VuMeter,
-            _ => Self::Wave,
-        }
-    }
-
-    fn as_config(self) -> &'static str {
-        match self {
-            Self::Wave => "wave",
-            Self::Solid => "solid",
-            Self::Cycle => "cycle",
-            Self::Pulse => "pulse",
-            Self::Blink => "blink",
-            Self::Lightning => "lightning",
-            Self::VuMeter => "vu_meter",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LightTarget {
-    All,
-    Top,
-    Bottom,
-}
-
-impl LightTarget {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Top => "Top",
-            Self::Bottom => "Bottom",
-        }
-    }
-
-    fn from_config(value: &str) -> Self {
-        match value {
-            "top" => Self::Top,
-            "bottom" => Self::Bottom,
-            _ => Self::All,
-        }
-    }
-
-    fn as_config(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Top => "top",
-            Self::Bottom => "bottom",
-        }
-    }
-}
-
-fn default_lighting_target() -> String {
-    "all".to_string()
-}
-
-fn default_minimize_to_tray() -> bool {
-    true
-}
-
-fn default_last_polar_pattern() -> String {
-    "unknown".to_string()
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct AppConfig {
-    schema_version: u32,
-    audio: AudioConfig,
-    lighting: LightingConfig,
-    ui: UiConfig,
-    service: ServiceConfig,
-    device: DeviceConfig,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct AudioConfig {
-    mic_volume: u8,
-    mic_monitoring: u8,
-    headphone_volume: u8,
-    mute_on_app_start: bool,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct LightingConfig {
-    effect: String,
-    #[serde(default = "default_lighting_target")]
-    target: String,
-    colors: Vec<String>,
-    selected_color: usize,
-    opacity: u8,
-    speed: u8,
-    brightness: u8,
-    live_when_muted: bool,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct UiConfig {
-    selected_tab: String,
-    window_width: f32,
-    window_height: f32,
-    #[serde(default = "default_minimize_to_tray")]
-    minimize_to_tray: bool,
-    #[serde(default = "default_last_polar_pattern")]
-    last_polar_pattern: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ServiceConfig {
-    enabled: bool,
-    restore_on_startup: bool,
-    owns_startup_restore: bool,
-    owns_lighting_loop: bool,
-    owns_hid_monitoring: bool,
-    owns_tray_handoff: bool,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct DeviceConfig {
-    preferred_capture_endpoint_id: Option<String>,
-    lighting_vendor_id: u16,
-    lighting_product_id: u16,
-}
 
 struct LightingState {
     effect: Effect,
@@ -377,30 +126,6 @@ type LightingFrame = [[u8; 3]; LIGHTING_CELL_COUNT];
 enum StreamDuration {
     Timed(Duration),
     Forever,
-}
-
-#[derive(Serialize)]
-struct LightingDevice {
-    vendor_id: u16,
-    product_id: u16,
-    interface_number: i32,
-    usage_page: u16,
-    usage: u16,
-    manufacturer: String,
-    product: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ServiceHealth {
-    schema_version: u32,
-    service_name: String,
-    state: String,
-    pid: u32,
-    updated_at: String,
-    heartbeat_count: u64,
-    restore_on_startup: bool,
-    last_restore: Option<String>,
-    last_error: Option<String>,
 }
 
 struct AudioPeakMonitor {
@@ -658,115 +383,6 @@ impl Drop for ComApartment {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            schema_version: CONFIG_SCHEMA_VERSION,
-            audio: AudioConfig {
-                mic_volume: 50,
-                mic_monitoring: 71,
-                headphone_volume: 5,
-                mute_on_app_start: false,
-            },
-            lighting: LightingConfig {
-                effect: "wave".to_string(),
-                target: "all".to_string(),
-                colors: vec![
-                    "#ff2010".to_string(),
-                    "#ff009a".to_string(),
-                    "#5d18ff".to_string(),
-                    "#00a2ff".to_string(),
-                    "#00edbf".to_string(),
-                    "#38ee3d".to_string(),
-                    "#ffea20".to_string(),
-                ],
-                selected_color: 0,
-                opacity: 25,
-                speed: 75,
-                brightness: 100,
-                live_when_muted: true,
-            },
-            ui: UiConfig {
-                selected_tab: "audio".to_string(),
-                window_width: 1120.0,
-                window_height: 760.0,
-                minimize_to_tray: true,
-                last_polar_pattern: "unknown".to_string(),
-            },
-            service: ServiceConfig {
-                enabled: false,
-                restore_on_startup: false,
-                owns_startup_restore: true,
-                owns_lighting_loop: false,
-                owns_hid_monitoring: false,
-                owns_tray_handoff: false,
-            },
-            device: DeviceConfig {
-                preferred_capture_endpoint_id: None,
-                lighting_vendor_id: 0x0951,
-                lighting_product_id: 0x171f,
-            },
-        }
-    }
-}
-
-impl AppConfig {
-    fn validate(&self) -> Result<(), String> {
-        if self.schema_version == 0 || self.schema_version > CONFIG_SCHEMA_VERSION {
-            return Err(format!(
-                "Unsupported config schema version {}.",
-                self.schema_version
-            ));
-        }
-        validate_percent("audio.mic_volume", self.audio.mic_volume)?;
-        validate_percent("audio.mic_monitoring", self.audio.mic_monitoring)?;
-        validate_percent("audio.headphone_volume", self.audio.headphone_volume)?;
-        validate_percent("lighting.opacity", self.lighting.opacity)?;
-        validate_percent("lighting.speed", self.lighting.speed)?;
-        validate_percent("lighting.brightness", self.lighting.brightness)?;
-        if self.lighting.colors.is_empty() {
-            return Err("lighting.colors must contain at least one color.".to_string());
-        }
-        for color in &self.lighting.colors {
-            parse_rgb_hex(color)?;
-        }
-        if self.lighting.selected_color >= self.lighting.colors.len() {
-            return Err("lighting.selected_color is outside lighting.colors.".to_string());
-        }
-        if !matches!(self.lighting.target.as_str(), "all" | "top" | "bottom") {
-            return Err("lighting.target must be 'all', 'top', or 'bottom'.".to_string());
-        }
-        if !matches!(self.ui.selected_tab.as_str(), "audio" | "lights") {
-            return Err("ui.selected_tab must be 'audio' or 'lights'.".to_string());
-        }
-        if !matches!(
-            self.ui.last_polar_pattern.as_str(),
-            "stereo" | "omni" | "cardioid" | "bidirectional" | "unknown"
-        ) {
-            return Err("ui.last_polar_pattern is invalid.".to_string());
-        }
-        if self.ui.window_width < 640.0 || self.ui.window_height < 480.0 {
-            return Err("ui.window_width/window_height are too small.".to_string());
-        }
-        Ok(())
-    }
-
-    fn migrated(mut self) -> Self {
-        if self.schema_version < CONFIG_SCHEMA_VERSION {
-            self.schema_version = CONFIG_SCHEMA_VERSION;
-        }
-        self
-    }
-}
-
-fn validate_percent(name: &str, value: u8) -> Result<(), String> {
-    if value > 100 {
-        Err(format!("{name} must be 0..100."))
-    } else {
-        Ok(())
-    }
-}
-
 pub fn run_app() {
     install_panic_hook();
     log_event(
@@ -780,154 +396,6 @@ pub fn run_app() {
         process::exit(1);
     }
     log_event("info", "app.exit", &[]);
-}
-
-fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|panic_info| {
-        let message = panic_info
-            .payload()
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| {
-                panic_info
-                    .payload()
-                    .downcast_ref::<String>()
-                    .map(String::as_str)
-            })
-            .unwrap_or("panic");
-        let location = panic_info
-            .location()
-            .map(|location| format!("{}:{}", location.file(), location.line()))
-            .unwrap_or_else(|| "unknown".to_string());
-        let report_path = write_crash_report(message, &location).unwrap_or_else(|_| PathBuf::new());
-        log_event(
-            "error",
-            "app.panic",
-            &[
-                ("message", message.to_string()),
-                ("location", location),
-                ("report_path", report_path.display().to_string()),
-            ],
-        );
-    }));
-}
-
-fn log_event(level: &str, event: &str, fields: &[(&str, String)]) {
-    let path = log_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    let mut object = serde_json::Map::new();
-    object.insert("ts".to_string(), serde_json::Value::String(log_timestamp()));
-    object.insert(
-        "level".to_string(),
-        serde_json::Value::String(level.to_string()),
-    );
-    object.insert(
-        "event".to_string(),
-        serde_json::Value::String(event.to_string()),
-    );
-    object.insert(
-        "pid".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(process::id())),
-    );
-    for (key, value) in fields {
-        object.insert((*key).to_string(), serde_json::Value::String(value.clone()));
-    }
-
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{}", serde_json::Value::Object(object));
-    }
-
-    if should_write_event_log(level, event) {
-        write_windows_event(level, event, fields);
-    }
-}
-
-fn should_write_event_log(level: &str, event: &str) -> bool {
-    matches!(level, "warn" | "error")
-        || matches!(event, "app.start" | "app.exit" | "gui.start" | "gui.exit")
-}
-
-fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
-    let event_type = match level {
-        "error" => EVENTLOG_ERROR_TYPE,
-        "warn" => EVENTLOG_WARNING_TYPE,
-        _ => EVENTLOG_INFORMATION_TYPE,
-    };
-
-    let mut lines = vec![
-        format!("event={event}"),
-        format!("level={level}"),
-        format!("pid={}", process::id()),
-        format!("log_path={}", log_file_path().display()),
-    ];
-    for (key, value) in fields {
-        lines.push(format!("{key}={value}"));
-    }
-    let message = lines.join("\r\n");
-    let wide_message = message.encode_utf16().chain([0]).collect::<Vec<_>>();
-    let strings = [PCWSTR(wide_message.as_ptr())];
-
-    unsafe {
-        if let Ok(handle) = RegisterEventSourceW(None, w!("HyperXMicLite")) {
-            let _ = ReportEventW(
-                handle,
-                event_type,
-                0,
-                event_id_for(event),
-                None,
-                0,
-                Some(&strings),
-                None,
-            );
-            let _ = DeregisterEventSource(handle);
-        }
-    }
-}
-
-fn event_id_for(event: &str) -> u32 {
-    let _ = event;
-    EVENTLOG_MESSAGE_ID
-}
-
-fn write_crash_report(message: &str, location: &str) -> Result<PathBuf, String> {
-    let dir = app_data_dir().join("crashes");
-    fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    let path = dir.join(format!("panic-{}.json", unix_timestamp_seconds()));
-    let report = serde_json::json!({
-        "ts": log_timestamp(),
-        "message": message,
-        "location": location,
-        "args": env::args().collect::<Vec<_>>(),
-        "version": env!("CARGO_PKG_VERSION"),
-        "log_path": log_file_path(),
-        "config_path": config_path(),
-    });
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("{}: {error}", path.display()))?;
-    Ok(path)
-}
-
-fn log_timestamp() -> String {
-    let seconds = unix_timestamp_seconds();
-    format!("{seconds}")
-}
-
-fn json_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-}
-
-fn log_file_path() -> PathBuf {
-    app_data_dir().join("logs").join("app.log")
-}
-
-fn service_health_path() -> PathBuf {
-    app_data_dir().join("service-health.json")
 }
 
 fn run() -> WinResult<()> {
@@ -1944,156 +1412,10 @@ fn config_usage() {
     );
 }
 
-fn app_data_dir() -> PathBuf {
-    env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(APP_NAME)
-}
-
-fn config_dir() -> PathBuf {
-    app_data_dir()
-}
-
-fn config_path() -> PathBuf {
-    config_dir().join("config.json")
-}
-
-fn load_or_create_config() -> Result<AppConfig, String> {
-    let path = config_path();
-    if !path.exists() {
-        let config = AppConfig::default();
-        save_config(&config)?;
-        return Ok(config);
-    }
-    load_config_from_path(&path)
-}
-
-fn load_config_from_path(path: &Path) -> Result<AppConfig, String> {
-    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let value = serde_json::from_str::<serde_json::Value>(&text)
-        .map_err(|error| format!("{}: invalid JSON: {error}", path.display()))?;
-    let migrated = migrate_config_value(value);
-    let config = serde_json::from_value::<AppConfig>(migrated)
-        .map_err(|error| format!("{}: invalid config: {error}", path.display()))?
-        .migrated();
-    config.validate()?;
-    log_event(
-        "info",
-        "config.load",
-        &[("path", path.display().to_string())],
-    );
-    Ok(config)
-}
-
-fn migrate_config_value(mut value: serde_json::Value) -> serde_json::Value {
-    let defaults = serde_json::to_value(AppConfig::default()).unwrap_or_default();
-    merge_missing_json(&mut value, &defaults);
-    value
-}
-
-fn merge_missing_json(value: &mut serde_json::Value, defaults: &serde_json::Value) {
-    if let (Some(value_object), Some(default_object)) =
-        (value.as_object_mut(), defaults.as_object())
-    {
-        for (key, default_value) in default_object {
-            match value_object.get_mut(key) {
-                Some(existing) => merge_missing_json(existing, default_value),
-                None => {
-                    value_object.insert(key.clone(), default_value.clone());
-                }
-            }
-        }
-    }
-}
-
-fn save_config(config: &AppConfig) -> Result<(), String> {
-    config.validate()?;
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
-    fs::write(&path, format!("{text}\n"))
-        .map_err(|error| format!("{}: {error}", path.display()))?;
-    log_event(
-        "info",
-        "config.save",
-        &[("path", path.display().to_string())],
-    );
-    Ok(())
-}
-
 fn print_config_json(config: &AppConfig) -> Result<(), String> {
     let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
     println!("{text}");
     Ok(())
-}
-
-fn export_config(destination: &Path) -> Result<(), String> {
-    let config = load_or_create_config()?;
-    let text = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    fs::write(destination, format!("{text}\n"))
-        .map_err(|error| format!("{}: {error}", destination.display()))?;
-    log_event(
-        "info",
-        "config.export",
-        &[("path", destination.display().to_string())],
-    );
-    println!("Exported config to {}", destination.display());
-    Ok(())
-}
-
-fn import_config(source: &Path) -> Result<(), String> {
-    let config = load_config_from_path(source)?;
-    backup_config_if_present()?;
-    save_config(&config)?;
-    log_event(
-        "info",
-        "config.import",
-        &[("source", source.display().to_string())],
-    );
-    println!("Imported config from {}", source.display());
-    Ok(())
-}
-
-fn validate_config_file(path: &Path) -> Result<(), String> {
-    let config = load_config_from_path(path)?;
-    config.validate()?;
-    println!("Config is valid: {}", path.display());
-    Ok(())
-}
-
-fn reset_config() -> Result<(), String> {
-    backup_config_if_present()?;
-    save_config(&AppConfig::default())?;
-    log_event("info", "config.reset", &[]);
-    println!("Reset config to defaults at {}", config_path().display());
-    Ok(())
-}
-
-fn backup_config_if_present() -> Result<(), String> {
-    let path = config_path();
-    if !path.exists() {
-        return Ok(());
-    }
-    let backup = config_dir().join(format!("config.backup.{}.json", unix_timestamp_seconds()));
-    fs::copy(&path, &backup)
-        .map(|_| ())
-        .map_err(|error| format!("{}: {error}", backup.display()))?;
-    log_event(
-        "info",
-        "config.backup",
-        &[("path", backup.display().to_string())],
-    );
-    Ok(())
-}
-
-fn unix_timestamp_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn print_lighting_detection() {
