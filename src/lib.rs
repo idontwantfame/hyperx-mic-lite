@@ -14,6 +14,7 @@ mod lighting;
 mod logging;
 mod logs;
 mod model;
+mod mqtt;
 mod paths;
 mod service;
 mod startup;

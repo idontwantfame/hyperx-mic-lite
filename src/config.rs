@@ -57,6 +57,34 @@ fn default_dashboard_column_gap() -> f32 {
     18.0
 }
 
+fn default_mqtt_url() -> String {
+    "mqtt://localhost:1883".to_string()
+}
+
+fn default_mqtt_client_id() -> String {
+    "hyperx-mic-lite".to_string()
+}
+
+fn default_mqtt_base_topic() -> String {
+    "hyperx_mic_lite/quadcast_s".to_string()
+}
+
+fn default_mqtt_discovery_prefix() -> String {
+    "homeassistant".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_mqtt_qos() -> u8 {
+    1
+}
+
+fn default_mqtt_keep_alive_secs() -> u64 {
+    30
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct AppConfig {
     pub(crate) schema_version: u32,
@@ -65,6 +93,8 @@ pub(crate) struct AppConfig {
     pub(crate) ui: UiConfig,
     pub(crate) service: ServiceConfig,
     pub(crate) device: DeviceConfig,
+    #[serde(default)]
+    pub(crate) mqtt: MqttConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -140,6 +170,53 @@ pub(crate) struct DeviceConfig {
     pub(crate) lighting_product_id: u16,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct MqttConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_mqtt_url")]
+    pub(crate) url: String,
+    #[serde(default = "default_mqtt_client_id")]
+    pub(crate) client_id: String,
+    #[serde(default)]
+    pub(crate) username: Option<String>,
+    #[serde(default)]
+    pub(crate) password: Option<String>,
+    #[serde(default = "default_mqtt_base_topic")]
+    pub(crate) base_topic: String,
+    #[serde(default = "default_mqtt_discovery_prefix")]
+    pub(crate) discovery_prefix: String,
+    #[serde(default = "default_true")]
+    pub(crate) home_assistant_discovery: bool,
+    #[serde(default = "default_true")]
+    pub(crate) retain_state: bool,
+    #[serde(default = "default_mqtt_qos")]
+    pub(crate) qos: u8,
+    #[serde(default = "default_mqtt_keep_alive_secs")]
+    pub(crate) keep_alive_secs: u64,
+    #[serde(default = "default_true")]
+    pub(crate) clean_session: bool,
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_mqtt_url(),
+            client_id: default_mqtt_client_id(),
+            username: None,
+            password: None,
+            base_topic: default_mqtt_base_topic(),
+            discovery_prefix: default_mqtt_discovery_prefix(),
+            home_assistant_discovery: true,
+            retain_state: true,
+            qos: 1,
+            keep_alive_secs: 30,
+            clean_session: true,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -200,6 +277,7 @@ impl Default for AppConfig {
                 lighting_vendor_id: 0x0951,
                 lighting_product_id: 0x171f,
             },
+            mqtt: MqttConfig::default(),
         }
     }
 }
@@ -268,6 +346,17 @@ impl AppConfig {
         if !(0.0..=40.0).contains(&self.ui.dashboard_column_gap) {
             return Err("ui.dashboard_column_gap must be 0..40.".to_string());
         }
+        validate_topic_prefix("mqtt.base_topic", &self.mqtt.base_topic)?;
+        validate_topic_prefix("mqtt.discovery_prefix", &self.mqtt.discovery_prefix)?;
+        if self.mqtt.client_id.trim().is_empty() {
+            return Err("mqtt.client_id must not be empty.".to_string());
+        }
+        if self.mqtt.qos > 2 {
+            return Err("mqtt.qos must be 0, 1, or 2.".to_string());
+        }
+        if !(5..=3600).contains(&self.mqtt.keep_alive_secs) {
+            return Err("mqtt.keep_alive_secs must be 5..3600.".to_string());
+        }
         Ok(())
     }
 
@@ -311,6 +400,19 @@ fn validate_rgb_hex(value: &str) -> Result<(), String> {
     let hex = value.strip_prefix('#').unwrap_or(value);
     if hex.len() != 6 || !hex.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return Err(format!("Invalid RGB color '{value}'. Use rrggbb."));
+    }
+    Ok(())
+}
+
+fn validate_topic_prefix(name: &str, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('/') || value.ends_with('/') {
+        return Err(format!(
+            "{name} must be a non-empty topic prefix without leading/trailing slash."
+        ));
+    }
+    if value.contains('#') || value.contains('+') {
+        return Err(format!("{name} must not contain MQTT wildcards."));
     }
     Ok(())
 }
