@@ -3690,218 +3690,242 @@ impl MicLiteApp {
         self.drain_hid_events();
         self.refresh_status_periodic();
         self.refresh_input_peak();
-        self.ui_mic_stage(ui);
+        ui.horizontal(|ui| {
+            let pattern_width = 238.0;
+            let gap = 12.0;
+            let stage_width = (ui.available_width() - pattern_width - gap).max(420.0);
+            ui.allocate_ui(egui::vec2(stage_width, 250.0), |ui| {
+                self.ui_mic_stage(ui);
+            });
+            ui.add_space(gap);
+            ui.allocate_ui(egui::vec2(pattern_width, 250.0), |ui| {
+                self.ui_pattern_panel(ui);
+            });
+        });
         ui.separator();
-        ui.columns(3, |columns| {
+        ui.columns(2, |columns| {
             columns[0].vertical(|ui| self.ui_audio_panel(ui));
             columns[1].vertical(|ui| self.ui_lighting_panel(ui));
-            columns[2].vertical(|ui| self.ui_pattern_panel(ui));
         });
     }
 
     fn ui_audio_panel(&mut self, ui: &mut egui::Ui) {
         let muted = self.status.as_ref().is_some_and(|status| status.muted);
         ui.set_min_width(260.0);
-        section_label(ui, "AUDIO");
         ui.add_space(4.0);
-        section_label(ui, "MIC VOLUME");
-        if percent_slider(ui, &mut self.mic_volume, 210.0).changed() {
-            self.set_volume();
-            self.save_config_snapshot();
-        }
-
-        ui.add_space(10.0);
-        section_label(ui, "INPUT LEVEL");
-        let display_peak = self.input_peak.sqrt().clamp(0.0, 1.0);
-        ui.add(
-            egui::ProgressBar::new(display_peak)
-                .desired_width(245.0)
-                .text(format!("{:.1}%", display_peak * 100.0)),
-        );
-        ui.small("Bottom dial controls hardware gain.");
-
-        ui.add_space(10.0);
-        section_label(ui, "MIC MONITORING");
-        if percent_slider(ui, &mut self.mic_monitoring, 210.0).changed() {
-            self.set_mic_monitoring();
-            self.save_config_snapshot();
-        }
-
-        ui.add_space(10.0);
-        section_label(ui, "HEADPHONE VOLUME");
-        if percent_slider(ui, &mut self.headphone_volume, 210.0).changed() {
-            self.set_headphone_volume();
-            self.save_config_snapshot();
-        }
-
-        ui.add_space(10.0);
-        let button_text = if muted {
-            "Unmute microphone"
-        } else {
-            "Mute microphone"
-        };
-        if ui
-            .add_sized([180.0, 28.0], egui::Button::new(button_text))
-            .clicked()
-        {
-            self.set_mute(!muted);
-        }
-
-        if ui
-            .checkbox(
-                &mut self.mute_on_app_start,
-                "Mute microphone when app starts",
-            )
-            .changed()
-        {
-            self.save_config_snapshot();
-        }
-
-        if let Some(error) = &self.status_error {
-            ui.add_space(8.0);
-            ui.colored_label(egui::Color32::from_rgb(255, 120, 120), error);
-        }
-    }
-
-    fn ui_lighting_panel(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(340.0);
-        section_label(ui, "LIGHTING");
-        ui.columns(2, |columns| {
-            columns[0].vertical(|ui| {
-                section_label(ui, "EFFECTS");
-                for effect in [
-                    Effect::Wave,
-                    Effect::Solid,
-                    Effect::Cycle,
-                    Effect::Pulse,
-                    Effect::Blink,
-                    Effect::Lightning,
-                    Effect::VuMeter,
-                ] {
-                    if ui
-                        .selectable_label(self.lighting.effect == effect, effect.label())
-                        .clicked()
-                    {
-                        self.lighting.effect = effect;
-                        self.save_config_snapshot();
-                    }
-                }
-            });
-
-            columns[1].vertical(|ui| {
-                section_label(ui, "TARGET");
-                let mut target_changed = false;
-                ui.horizontal(|ui| {
-                    target_changed |=
-                        target_button(ui, &mut self.lighting.target, LightTarget::All);
-                    target_changed |=
-                        target_button(ui, &mut self.lighting.target, LightTarget::Top);
-                    target_changed |=
-                        target_button(ui, &mut self.lighting.target, LightTarget::Bottom);
-                });
-                if target_changed {
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                section_label(ui, "AUDIO");
+                ui.add_space(4.0);
+                section_label(ui, "MIC VOLUME");
+                if percent_slider(ui, &mut self.mic_volume, 210.0).changed() {
+                    self.set_volume();
                     self.save_config_snapshot();
                 }
 
                 ui.add_space(10.0);
-                section_label(ui, "COLOR");
-                ui.horizontal_wrapped(|ui| {
-                    for index in 0..self.lighting.colors.len() {
-                        let color = self.lighting.colors[index];
-                        let selected = self.lighting.selected_color == index;
-                        let response = color_swatch(ui, color, selected);
-                        if response.clicked() {
-                            self.lighting.selected_color = index;
-                            self.save_config_snapshot();
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                let mut color_changed = false;
-                if let Some(color) = self.lighting.colors.get_mut(self.lighting.selected_color) {
-                    color_changed = ui.color_edit_button_srgba(color).changed();
-                }
-                if color_changed {
+                section_label(ui, "INPUT LEVEL");
+                let display_peak = self.input_peak.sqrt().clamp(0.0, 1.0);
+                ui.add(
+                    egui::ProgressBar::new(display_peak)
+                        .desired_width(245.0)
+                        .text(format!("{:.1}%", display_peak * 100.0)),
+                );
+                ui.small("Bottom dial controls hardware gain.");
+
+                ui.add_space(10.0);
+                section_label(ui, "MIC MONITORING");
+                if percent_slider(ui, &mut self.mic_monitoring, 210.0).changed() {
+                    self.set_mic_monitoring();
                     self.save_config_snapshot();
+                }
+
+                ui.add_space(10.0);
+                section_label(ui, "HEADPHONE VOLUME");
+                if percent_slider(ui, &mut self.headphone_volume, 210.0).changed() {
+                    self.set_headphone_volume();
+                    self.save_config_snapshot();
+                }
+
+                ui.add_space(10.0);
+                let button_text = if muted {
+                    "Unmute microphone"
+                } else {
+                    "Mute microphone"
+                };
+                if ui
+                    .add_sized([180.0, 28.0], egui::Button::new(button_text))
+                    .clicked()
+                {
+                    self.set_mute(!muted);
+                }
+
+                if ui
+                    .checkbox(
+                        &mut self.mute_on_app_start,
+                        "Mute microphone when app starts",
+                    )
+                    .changed()
+                {
+                    self.save_config_snapshot();
+                }
+
+                if let Some(error) = &self.status_error {
+                    ui.add_space(8.0);
+                    ui.colored_label(egui::Color32::from_rgb(255, 120, 120), error);
                 }
             });
         });
+    }
 
-        ui.add_space(8.0);
-        section_label(ui, "BRIGHTNESS");
-        if percent_slider(ui, &mut self.lighting.brightness, 210.0).changed() {
-            self.save_config_snapshot();
-        }
-        section_label(ui, "SPEED");
-        if percent_slider(ui, &mut self.lighting.speed, 210.0).changed() {
-            self.save_config_snapshot();
-        }
-        section_label(ui, "OPACITY");
-        if percent_slider(ui, &mut self.lighting.opacity, 210.0).changed() {
-            self.save_config_snapshot();
-        }
-        if ui
-            .checkbox(&mut self.lighting.live_when_muted, "Lights show live state")
-            .changed()
-        {
-            self.save_config_snapshot();
-            if self.lighting.live_when_muted {
-                if let Some(is_live) = self.status.as_ref().map(|status| !status.muted) {
-                    self.apply_live_mute_lighting(is_live);
-                }
-            }
-        }
+    fn ui_lighting_panel(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(340.0);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                section_label(ui, "LIGHTING");
+                ui.columns(2, |columns| {
+                    columns[0].vertical(|ui| {
+                        section_label(ui, "EFFECTS");
+                        for effect in [
+                            Effect::Wave,
+                            Effect::Solid,
+                            Effect::Cycle,
+                            Effect::Pulse,
+                            Effect::Blink,
+                            Effect::Lightning,
+                            Effect::VuMeter,
+                        ] {
+                            if ui
+                                .selectable_label(self.lighting.effect == effect, effect.label())
+                                .clicked()
+                            {
+                                self.lighting.effect = effect;
+                                self.save_config_snapshot();
+                            }
+                        }
+                    });
 
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_sized([150.0, 28.0], egui::Button::new("Apply"))
-                .clicked()
-            {
-                self.apply_lighting_to_microphone();
-            }
-            if ui
-                .add_sized([150.0, 28.0], egui::Button::new("Save to Mic"))
-                .on_hover_text("Experimental persistent device write")
-                .clicked()
-            {
-                self.save_lighting_to_microphone();
-            }
-            if ui
-                .add_sized([150.0, 28.0], egui::Button::new("Stop Stream"))
-                .clicked()
-            {
-                if let Some(cancel) = &self.lighting_cancel {
-                    cancel.store(true, Ordering::Relaxed);
+                    columns[1].vertical(|ui| {
+                        section_label(ui, "TARGET");
+                        let mut target_changed = false;
+                        ui.horizontal(|ui| {
+                            target_changed |=
+                                target_button(ui, &mut self.lighting.target, LightTarget::All);
+                            target_changed |=
+                                target_button(ui, &mut self.lighting.target, LightTarget::Top);
+                            target_changed |=
+                                target_button(ui, &mut self.lighting.target, LightTarget::Bottom);
+                        });
+                        if target_changed {
+                            self.save_config_snapshot();
+                        }
+
+                        ui.add_space(10.0);
+                        section_label(ui, "COLOR");
+                        ui.horizontal_wrapped(|ui| {
+                            for index in 0..self.lighting.colors.len() {
+                                let color = self.lighting.colors[index];
+                                let selected = self.lighting.selected_color == index;
+                                let response = color_swatch(ui, color, selected);
+                                if response.clicked() {
+                                    self.lighting.selected_color = index;
+                                    self.save_config_snapshot();
+                                }
+                            }
+                        });
+                        ui.add_space(6.0);
+                        let mut color_changed = false;
+                        if let Some(color) =
+                            self.lighting.colors.get_mut(self.lighting.selected_color)
+                        {
+                            color_changed = ui.color_edit_button_srgba(color).changed();
+                        }
+                        if color_changed {
+                            self.save_config_snapshot();
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+                section_label(ui, "BRIGHTNESS");
+                if percent_slider(ui, &mut self.lighting.brightness, 210.0).changed() {
+                    self.save_config_snapshot();
                 }
-                self.lighting_cancel = None;
-                self.lighting_message = "Lighting stream stopped.".to_string();
-                log_event("info", "lighting.apply.stop", &[]);
-            }
+                section_label(ui, "SPEED");
+                if percent_slider(ui, &mut self.lighting.speed, 210.0).changed() {
+                    self.save_config_snapshot();
+                }
+                section_label(ui, "OPACITY");
+                if percent_slider(ui, &mut self.lighting.opacity, 210.0).changed() {
+                    self.save_config_snapshot();
+                }
+                if ui
+                    .checkbox(&mut self.lighting.live_when_muted, "Lights show live state")
+                    .changed()
+                {
+                    self.save_config_snapshot();
+                    if self.lighting.live_when_muted {
+                        if let Some(is_live) = self.status.as_ref().map(|status| !status.muted) {
+                            self.apply_live_mute_lighting(is_live);
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_sized([150.0, 28.0], egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        self.apply_lighting_to_microphone();
+                    }
+                    if ui
+                        .add_sized([150.0, 28.0], egui::Button::new("Save to Mic"))
+                        .on_hover_text("Experimental persistent device write")
+                        .clicked()
+                    {
+                        self.save_lighting_to_microphone();
+                    }
+                    if ui
+                        .add_sized([150.0, 28.0], egui::Button::new("Stop Stream"))
+                        .clicked()
+                    {
+                        if let Some(cancel) = &self.lighting_cancel {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                        self.lighting_cancel = None;
+                        self.lighting_message = "Lighting stream stopped.".to_string();
+                        log_event("info", "lighting.apply.stop", &[]);
+                    }
+                });
+                if let Some(device) = &self.lighting_device {
+                    ui.small(format!("{} {}", device.manufacturer, device.product));
+                }
+                ui.label(&self.lighting_message);
+            });
         });
-        if let Some(device) = &self.lighting_device {
-            ui.small(format!("{} {}", device.manufacturer, device.product));
-        }
-        ui.label(&self.lighting_message);
     }
 
     fn ui_pattern_panel(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(220.0);
         section_label(ui, "POLAR PATTERN");
-        ui.horizontal_wrapped(|ui| {
+        ui.vertical(|ui| {
             pattern_tile(ui, PolarPattern::Stereo, self.polar_pattern);
             pattern_tile(ui, PolarPattern::Omni, self.polar_pattern);
             pattern_tile(ui, PolarPattern::Cardioid, self.polar_pattern);
             pattern_tile(ui, PolarPattern::Bidirectional, self.polar_pattern);
         });
-        ui.add_space(10.0);
+        ui.add_space(8.0);
         ui.label(format!("Last used: {}", self.polar_pattern.label()));
         ui.label(pattern_description(self.polar_pattern));
     }
 
     fn ui_mic_stage(&self, ui: &mut egui::Ui) {
         let available = ui.available_width();
-        let height = (ui.available_height() * 0.38).clamp(190.0, 290.0);
+        let height = ui.available_height().clamp(190.0, 290.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(available, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
 
@@ -3990,12 +4014,17 @@ impl eframe::App for MicLiteApp {
             log_event("info", "gui.start_minimized", &[]);
         }
         ui.ctx().request_repaint_after(Duration::from_millis(50));
-        ui.vertical(|ui| {
-            ui.add_space(8.0);
-            self.ui_top_bar(ui);
-            ui.add_space(8.0);
-            ui.separator();
-            self.ui_dashboard(ui);
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.add_space(8.0);
+                self.ui_top_bar(ui);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                self.ui_dashboard(ui);
+            });
+            ui.add_space(10.0);
         });
     }
 }
