@@ -204,6 +204,43 @@ impl Effect {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LightTarget {
+    All,
+    Top,
+    Bottom,
+}
+
+impl LightTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
+        }
+    }
+
+    fn from_config(value: &str) -> Self {
+        match value {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            _ => Self::All,
+        }
+    }
+
+    fn as_config(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
+fn default_lighting_target() -> String {
+    "all".to_string()
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct AppConfig {
     schema_version: u32,
@@ -225,6 +262,8 @@ struct AudioConfig {
 #[derive(Clone, Serialize, Deserialize)]
 struct LightingConfig {
     effect: String,
+    #[serde(default = "default_lighting_target")]
+    target: String,
     colors: Vec<String>,
     selected_color: usize,
     opacity: u8,
@@ -259,6 +298,7 @@ struct DeviceConfig {
 
 struct LightingState {
     effect: Effect,
+    target: LightTarget,
     colors: Vec<egui::Color32>,
     selected_color: usize,
     opacity: u8,
@@ -270,6 +310,7 @@ struct LightingState {
 #[derive(Clone)]
 struct LightingProgram {
     effect: Effect,
+    target: LightTarget,
     colors: Vec<[u8; 3]>,
     speed: u8,
     brightness: u8,
@@ -382,6 +423,7 @@ impl Default for AppConfig {
             },
             lighting: LightingConfig {
                 effect: "wave".to_string(),
+                target: "all".to_string(),
                 colors: vec![
                     "#ff2010".to_string(),
                     "#ff009a".to_string(),
@@ -441,6 +483,9 @@ impl AppConfig {
         }
         if self.lighting.selected_color >= self.lighting.colors.len() {
             return Err("lighting.selected_color is outside lighting.colors.".to_string());
+        }
+        if !matches!(self.lighting.target.as_str(), "all" | "top" | "bottom") {
+            return Err("lighting.target must be 'all', 'top', or 'bottom'.".to_string());
         }
         if !matches!(self.ui.selected_tab.as_str(), "audio" | "lights") {
             return Err("ui.selected_tab must be 'audio' or 'lights'.".to_string());
@@ -1996,6 +2041,7 @@ fn run_lighting_solid(args: &[String]) {
 
     let program = LightingProgram {
         effect: Effect::Solid,
+        target: LightTarget::All,
         colors: vec![color],
         speed: 75,
         brightness: 100,
@@ -2063,6 +2109,7 @@ fn run_lighting_effect(args: &[String]) {
         .collect::<Vec<_>>();
     let program = LightingProgram {
         effect,
+        target: LightTarget::from_config(&config.lighting.target),
         colors: if colors.is_empty() {
             vec![[0, 255, 0]]
         } else {
@@ -2113,7 +2160,10 @@ fn run_lighting_vu_test(args: &[String]) {
         .clamp(1, 30);
 
     let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
-    let frame = build_vu_frame(level as f32 / 100.0, config.lighting.brightness);
+    let frame = apply_light_target(
+        build_vu_frame(level as f32 / 100.0, config.lighting.brightness),
+        LightTarget::from_config(&config.lighting.target),
+    );
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(seconds) {
         if let Err(error) = write_lighting_frame_once(frame, packet_log) {
@@ -2540,7 +2590,7 @@ fn stream_lighting_program_cancelable(
             };
             let target = peak.sqrt().clamp(0.0, 1.0);
             vu_level = smooth_vu_level(vu_level, target);
-            build_vu_frame(vu_level, program.brightness)
+            apply_light_target(build_vu_frame(vu_level, program.brightness), program.target)
         } else {
             let frame = frames[index % frames.len()];
             index += 1;
@@ -2610,7 +2660,7 @@ fn build_save_sentinel_packet() -> [u8; 64] {
 
 fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
     let colors = normalized_colors(program);
-    match program.effect {
+    let mut frames = match program.effect {
         Effect::Solid => vec![solid_frame(colors[0])],
         Effect::Cycle => cycle_frames(&colors, program.speed, false),
         Effect::Wave => cycle_frames(&colors, program.speed, true),
@@ -2618,7 +2668,11 @@ fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
         Effect::Blink => blink_frames(&colors, program.speed),
         Effect::Lightning => lightning_frames(&colors, program.speed),
         Effect::VuMeter => vec![solid_frame([0, 0, 0])],
+    };
+    for frame in &mut frames {
+        apply_light_target_in_place(frame, program.target);
     }
+    frames
 }
 
 fn normalized_colors(program: &LightingProgram) -> Vec<[u8; 3]> {
@@ -2645,6 +2699,27 @@ fn transition_steps(speed: u8, min: usize, max: usize) -> usize {
 
 fn solid_frame(color: [u8; 3]) -> LightingFrame {
     [color; LIGHTING_CELL_COUNT]
+}
+
+fn apply_light_target(mut frame: LightingFrame, target: LightTarget) -> LightingFrame {
+    apply_light_target_in_place(&mut frame, target);
+    frame
+}
+
+fn apply_light_target_in_place(frame: &mut LightingFrame, target: LightTarget) {
+    match target {
+        LightTarget::All => {}
+        LightTarget::Top => {
+            for color in frame.iter_mut().skip(LIGHTING_CELL_COUNT / 2) {
+                *color = [0, 0, 0];
+            }
+        }
+        LightTarget::Bottom => {
+            for color in frame.iter_mut().take(LIGHTING_CELL_COUNT / 2) {
+                *color = [0, 0, 0];
+            }
+        }
+    }
 }
 
 fn cycle_frames(colors: &[[u8; 3]], speed: u8, wave: bool) -> Vec<LightingFrame> {
@@ -3002,6 +3077,7 @@ impl MicLiteApp {
             hid_events: spawn_hid_event_listener(),
             lighting: LightingState {
                 effect: Effect::from_config(&config.lighting.effect),
+                target: LightTarget::from_config(&config.lighting.target),
                 colors: if colors.is_empty() {
                     AppConfig::default()
                         .lighting
@@ -3057,6 +3133,7 @@ impl MicLiteApp {
             },
             lighting: LightingConfig {
                 effect: self.lighting.effect.as_config().to_string(),
+                target: self.lighting.target.as_config().to_string(),
                 colors: self
                     .lighting
                     .colors
@@ -3184,6 +3261,7 @@ impl MicLiteApp {
 
         let program = LightingProgram {
             effect: self.lighting.effect,
+            target: self.lighting.target,
             colors: self
                 .lighting
                 .colors
@@ -3267,20 +3345,15 @@ impl MicLiteApp {
             ui.separator();
             ui.columns(2, |columns| {
                 columns[0].vertical(|ui| {
-                    ui.label("MIC VOLUME");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Slider::new(&mut self.mic_volume, 0..=100).show_value(false))
-                            .changed()
-                        {
-                            self.set_volume();
-                            self.save_config_snapshot();
-                        }
-                        ui.label(format!("{}", self.mic_volume));
-                    });
+                    ui.set_min_width(360.0);
+                    section_label(ui, "MIC VOLUME");
+                    if percent_slider(ui, &mut self.mic_volume, 280.0).changed() {
+                        self.set_volume();
+                        self.save_config_snapshot();
+                    }
 
-                    ui.add_space(20.0);
-                    ui.label("INPUT LEVEL");
+                    ui.add_space(18.0);
+                    section_label(ui, "INPUT LEVEL");
                     let display_peak = self.input_peak.sqrt().clamp(0.0, 1.0);
                     ui.add(
                         egui::ProgressBar::new(display_peak)
@@ -3289,45 +3362,30 @@ impl MicLiteApp {
                     );
                     ui.small("Speak while turning the bottom gain dial to set hardware gain.");
 
-                    ui.add_space(20.0);
-                    ui.label("MIC MONITORING");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut self.mic_monitoring, 0..=100)
-                                    .show_value(false),
-                            )
-                            .changed()
-                        {
-                            self.set_mic_monitoring();
-                            self.save_config_snapshot();
-                        }
-                        ui.label(format!("{}", self.mic_monitoring));
-                    });
+                    ui.add_space(18.0);
+                    section_label(ui, "MIC MONITORING");
+                    if percent_slider(ui, &mut self.mic_monitoring, 280.0).changed() {
+                        self.set_mic_monitoring();
+                        self.save_config_snapshot();
+                    }
 
-                    ui.add_space(20.0);
-                    ui.label("HEADPHONE VOLUME");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut self.headphone_volume, 0..=100)
-                                    .show_value(false),
-                            )
-                            .changed()
-                        {
-                            self.set_headphone_volume();
-                            self.save_config_snapshot();
-                        }
-                        ui.label(format!("{}", self.headphone_volume));
-                    });
+                    ui.add_space(18.0);
+                    section_label(ui, "HEADPHONE VOLUME");
+                    if percent_slider(ui, &mut self.headphone_volume, 280.0).changed() {
+                        self.set_headphone_volume();
+                        self.save_config_snapshot();
+                    }
 
-                    ui.add_space(20.0);
+                    ui.add_space(18.0);
                     let button_text = if muted {
                         "Unmute microphone"
                     } else {
                         "Mute microphone"
                     };
-                    if ui.button(button_text).clicked() {
+                    if ui
+                        .add_sized([180.0, 28.0], egui::Button::new(button_text))
+                        .clicked()
+                    {
                         self.set_mute(!muted);
                     }
 
@@ -3348,7 +3406,8 @@ impl MicLiteApp {
                 });
 
                 columns[1].vertical(|ui| {
-                    ui.label("POLAR PATTERN");
+                    ui.set_min_width(430.0);
+                    section_label(ui, "POLAR PATTERN");
                     ui.horizontal(|ui| {
                         polar_button(ui, "Stereo", self.polar_pattern == PolarPattern::Stereo);
                         polar_button(ui, "Omni", self.polar_pattern == PolarPattern::Omni);
@@ -3362,8 +3421,6 @@ impl MicLiteApp {
                     ui.add_space(16.0);
                     ui.strong(self.polar_pattern.label());
                     ui.label(pattern_description(self.polar_pattern));
-                    ui.add_space(12.0);
-                    ui.label("This follows the physical dial via HID input reports.");
                 });
             });
         });
@@ -3376,7 +3433,8 @@ impl MicLiteApp {
             ui.separator();
             ui.columns(4, |columns| {
                 columns[0].vertical(|ui| {
-                    ui.label("EFFECTS");
+                    ui.set_min_width(180.0);
+                    section_label(ui, "EFFECTS");
                     for effect in [
                         Effect::Wave,
                         Effect::Solid,
@@ -3397,32 +3455,30 @@ impl MicLiteApp {
                 });
 
                 columns[1].vertical(|ui| {
-                    ui.label("TARGET");
+                    ui.set_min_width(190.0);
+                    section_label(ui, "TARGET");
+                    let mut target_changed = false;
                     ui.horizontal(|ui| {
-                        let _ = ui.selectable_label(true, "All Lights");
-                        ui.add_enabled(false, egui::Button::new("Selection"));
+                        target_changed |=
+                            target_button(ui, &mut self.lighting.target, LightTarget::All);
+                        target_changed |=
+                            target_button(ui, &mut self.lighting.target, LightTarget::Top);
+                        target_changed |=
+                            target_button(ui, &mut self.lighting.target, LightTarget::Bottom);
                     });
-                    ui.add_space(20.0);
-                    ui.label("OPACITY");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.lighting.opacity, 0..=100)
-                                .show_value(false),
-                        )
-                        .changed()
-                    {
+                    if target_changed {
                         self.save_config_snapshot();
                     }
-                    ui.horizontal(|ui| {
-                        ui.small("hidden");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.small("visible");
-                        });
-                    });
+                    ui.add_space(18.0);
+                    section_label(ui, "OPACITY");
+                    if percent_slider(ui, &mut self.lighting.opacity, 180.0).changed() {
+                        self.save_config_snapshot();
+                    }
                 });
 
                 columns[2].vertical(|ui| {
-                    ui.label("COLOR");
+                    ui.set_min_width(260.0);
+                    section_label(ui, "COLOR");
                     ui.horizontal_wrapped(|ui| {
                         for index in 0..self.lighting.colors.len() {
                             let color = self.lighting.colors[index];
@@ -3444,11 +3500,8 @@ impl MicLiteApp {
                         self.save_config_snapshot();
                     }
                     ui.add_space(18.0);
-                    ui.label("BRIGHTNESS");
-                    if ui
-                        .add(egui::Slider::new(&mut self.lighting.brightness, 0..=100))
-                        .changed()
-                    {
+                    section_label(ui, "BRIGHTNESS");
+                    if percent_slider(ui, &mut self.lighting.brightness, 220.0).changed() {
                         self.save_config_snapshot();
                     }
                     if ui
@@ -3466,31 +3519,29 @@ impl MicLiteApp {
                 });
 
                 columns[3].vertical(|ui| {
-                    ui.label("SPEED");
-                    if ui
-                        .add(egui::Slider::new(&mut self.lighting.speed, 0..=100).show_value(false))
-                        .changed()
-                    {
+                    ui.set_min_width(220.0);
+                    section_label(ui, "SPEED");
+                    if percent_slider(ui, &mut self.lighting.speed, 220.0).changed() {
                         self.save_config_snapshot();
                     }
-                    ui.horizontal(|ui| {
-                        ui.small("slow");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.small("fast");
-                        });
-                    });
                     ui.add_space(24.0);
-                    if ui.button("Apply to Microphone").clicked() {
+                    if ui
+                        .add_sized([180.0, 28.0], egui::Button::new("Apply to Microphone"))
+                        .clicked()
+                    {
                         self.apply_lighting_to_microphone();
                     }
                     if ui
-                        .button("Save to Microphone")
+                        .add_sized([180.0, 28.0], egui::Button::new("Save to Microphone"))
                         .on_hover_text("Experimental persistent device write")
                         .clicked()
                     {
                         self.save_lighting_to_microphone();
                     }
-                    if ui.button("Stop Lighting Stream").clicked() {
+                    if ui
+                        .add_sized([180.0, 28.0], egui::Button::new("Stop Lighting Stream"))
+                        .clicked()
+                    {
                         if let Some(cancel) = &self.lighting_cancel {
                             cancel.store(true, Ordering::Relaxed);
                         }
@@ -3510,7 +3561,7 @@ impl MicLiteApp {
 
     fn ui_mic_stage(&self, ui: &mut egui::Ui) {
         let available = ui.available_width();
-        let height = (ui.available_height() * 0.56).clamp(280.0, 420.0);
+        let height = (ui.available_height() * 0.46).clamp(250.0, 360.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(available, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
 
@@ -3573,6 +3624,35 @@ fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
     let selected = *current == tab;
     if ui.selectable_label(selected, label).clicked() {
         *current = tab;
+    }
+}
+
+fn section_label(ui: &mut egui::Ui, label: &str) {
+    ui.label(egui::RichText::new(label).color(egui::Color32::from_rgb(180, 184, 188)));
+}
+
+fn percent_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> egui::Response {
+    ui.horizontal(|ui| {
+        let response = ui.add_sized(
+            [width, 20.0],
+            egui::Slider::new(value, 0..=100).show_value(false),
+        );
+        ui.add_sized([34.0, 20.0], egui::Label::new(format!("{}", *value)));
+        response
+    })
+    .inner
+}
+
+fn target_button(ui: &mut egui::Ui, current: &mut LightTarget, target: LightTarget) -> bool {
+    let response = ui.add_sized(
+        [58.0, 30.0],
+        egui::Button::new(target.label()).selected(*current == target),
+    );
+    if response.clicked() {
+        *current = target;
+        true
+    } else {
+        false
     }
 }
 
