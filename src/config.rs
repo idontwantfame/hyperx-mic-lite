@@ -13,6 +13,14 @@ fn default_lighting_target() -> String {
     "all".to_string()
 }
 
+fn default_lighting_top_effect() -> String {
+    "solid".to_string()
+}
+
+fn default_lighting_bottom_effect() -> String {
+    "blink".to_string()
+}
+
 fn default_minimize_to_tray() -> bool {
     true
 }
@@ -72,6 +80,12 @@ pub(crate) struct LightingConfig {
     pub(crate) effect: String,
     #[serde(default = "default_lighting_target")]
     pub(crate) target: String,
+    #[serde(default)]
+    pub(crate) split_layers: bool,
+    #[serde(default = "default_lighting_top_effect")]
+    pub(crate) top_effect: String,
+    #[serde(default = "default_lighting_bottom_effect")]
+    pub(crate) bottom_effect: String,
     pub(crate) colors: Vec<String>,
     pub(crate) selected_color: usize,
     pub(crate) opacity: u8,
@@ -85,6 +99,10 @@ pub(crate) struct UiConfig {
     pub(crate) selected_tab: String,
     pub(crate) window_width: f32,
     pub(crate) window_height: f32,
+    #[serde(default)]
+    pub(crate) window_x: Option<f32>,
+    #[serde(default)]
+    pub(crate) window_y: Option<f32>,
     #[serde(default = "default_minimize_to_tray")]
     pub(crate) minimize_to_tray: bool,
     #[serde(default = "default_last_polar_pattern")]
@@ -135,6 +153,9 @@ impl Default for AppConfig {
             lighting: LightingConfig {
                 effect: "wave".to_string(),
                 target: "all".to_string(),
+                split_layers: false,
+                top_effect: default_lighting_top_effect(),
+                bottom_effect: default_lighting_bottom_effect(),
                 colors: vec![
                     "#ff2010".to_string(),
                     "#ff009a".to_string(),
@@ -154,6 +175,8 @@ impl Default for AppConfig {
                 selected_tab: "audio".to_string(),
                 window_width: 1120.0,
                 window_height: 760.0,
+                window_x: None,
+                window_y: None,
                 minimize_to_tray: true,
                 last_polar_pattern: "unknown".to_string(),
                 stage_pattern_left_factor: default_stage_pattern_left_factor(),
@@ -207,6 +230,9 @@ impl AppConfig {
         if !matches!(self.lighting.target.as_str(), "all" | "top" | "bottom") {
             return Err("lighting.target must be 'all', 'top', or 'bottom'.".to_string());
         }
+        validate_effect_name("lighting.effect", &self.lighting.effect)?;
+        validate_effect_name("lighting.top_effect", &self.lighting.top_effect)?;
+        validate_effect_name("lighting.bottom_effect", &self.lighting.bottom_effect)?;
         if !matches!(self.ui.selected_tab.as_str(), "audio" | "lights") {
             return Err("ui.selected_tab must be 'audio' or 'lights'.".to_string());
         }
@@ -219,6 +245,8 @@ impl AppConfig {
         if self.ui.window_width < 640.0 || self.ui.window_height < 480.0 {
             return Err("ui.window_width/window_height are too small.".to_string());
         }
+        validate_optional_window_position("ui.window_x", self.ui.window_x)?;
+        validate_optional_window_position("ui.window_y", self.ui.window_y)?;
         if !(0.20..=0.82).contains(&self.ui.stage_pattern_left_factor) {
             return Err("ui.stage_pattern_left_factor must be 0.20..0.82.".to_string());
         }
@@ -256,6 +284,26 @@ fn validate_percent(name: &str, value: u8) -> Result<(), String> {
         Err(format!("{name} must be 0..100."))
     } else {
         Ok(())
+    }
+}
+
+fn validate_optional_window_position(name: &str, value: Option<f32>) -> Result<(), String> {
+    if let Some(value) = value {
+        if !value.is_finite() || !(-32000.0..=32000.0).contains(&value) {
+            return Err(format!("{name} must be a finite screen coordinate."));
+        }
+    }
+    Ok(())
+}
+
+fn validate_effect_name(name: &str, value: &str) -> Result<(), String> {
+    if matches!(
+        value,
+        "wave" | "solid" | "cycle" | "pulse" | "blink" | "lightning" | "vu_meter"
+    ) {
+        Ok(())
+    } else {
+        Err(format!("{name} is invalid."))
     }
 }
 
