@@ -3708,7 +3708,7 @@ impl MicLiteApp {
                 self.ui_audio_panel(ui);
             });
             ui.add_space(18.0);
-            ui.allocate_ui(egui::vec2(620.0, 320.0), |ui| {
+            ui.allocate_ui(egui::vec2(420.0, 420.0), |ui| {
                 self.ui_lighting_panel(ui);
             });
         });
@@ -3785,75 +3785,68 @@ impl MicLiteApp {
     }
 
     fn ui_lighting_panel(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(340.0);
+        ui.set_min_width(390.0);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 section_label(ui, "LIGHTING");
+                ui.add_space(4.0);
+                section_label(ui, "EFFECTS");
+                for effect in [
+                    Effect::Wave,
+                    Effect::Solid,
+                    Effect::Cycle,
+                    Effect::Pulse,
+                    Effect::Blink,
+                    Effect::Lightning,
+                    Effect::VuMeter,
+                ] {
+                    if ui
+                        .selectable_label(self.lighting.effect == effect, effect.label())
+                        .clicked()
+                    {
+                        self.lighting.effect = effect;
+                        self.save_config_snapshot();
+                    }
+                }
+
+                ui.add_space(10.0);
+                section_label(ui, "TARGET");
+                let mut target_changed = false;
                 ui.horizontal(|ui| {
-                    ui.allocate_ui(egui::vec2(120.0, 180.0), |ui| {
-                        section_label(ui, "EFFECTS");
-                        for effect in [
-                            Effect::Wave,
-                            Effect::Solid,
-                            Effect::Cycle,
-                            Effect::Pulse,
-                            Effect::Blink,
-                            Effect::Lightning,
-                            Effect::VuMeter,
-                        ] {
-                            if ui
-                                .selectable_label(self.lighting.effect == effect, effect.label())
-                                .clicked()
-                            {
-                                self.lighting.effect = effect;
-                                self.save_config_snapshot();
-                            }
-                        }
-                    });
-
-                    ui.add_space(12.0);
-                    ui.allocate_ui(egui::vec2(430.0, 180.0), |ui| {
-                        section_label(ui, "TARGET");
-                        let mut target_changed = false;
-                        ui.horizontal(|ui| {
-                            target_changed |=
-                                target_button(ui, &mut self.lighting.target, LightTarget::All);
-                            target_changed |=
-                                target_button(ui, &mut self.lighting.target, LightTarget::Top);
-                            target_changed |=
-                                target_button(ui, &mut self.lighting.target, LightTarget::Bottom);
-                        });
-                        if target_changed {
-                            self.save_config_snapshot();
-                        }
-
-                        ui.add_space(10.0);
-                        section_label(ui, "COLOR");
-                        ui.horizontal_wrapped(|ui| {
-                            for index in 0..self.lighting.colors.len() {
-                                let color = self.lighting.colors[index];
-                                let selected = self.lighting.selected_color == index;
-                                let response = color_swatch(ui, color, selected);
-                                if response.clicked() {
-                                    self.lighting.selected_color = index;
-                                    self.save_config_snapshot();
-                                }
-                            }
-                        });
-                        ui.add_space(6.0);
-                        let mut color_changed = false;
-                        if let Some(color) =
-                            self.lighting.colors.get_mut(self.lighting.selected_color)
-                        {
-                            color_changed = ui.color_edit_button_srgba(color).changed();
-                        }
-                        if color_changed {
-                            self.save_config_snapshot();
-                        }
-                    });
+                    target_changed |=
+                        target_button(ui, &mut self.lighting.target, LightTarget::All);
+                    target_changed |=
+                        target_button(ui, &mut self.lighting.target, LightTarget::Top);
+                    target_changed |=
+                        target_button(ui, &mut self.lighting.target, LightTarget::Bottom);
                 });
+                if target_changed {
+                    self.save_config_snapshot();
+                }
+
+                ui.add_space(10.0);
+                section_label(ui, "COLOR");
+                ui.horizontal_wrapped(|ui| {
+                    for index in 0..self.lighting.colors.len() {
+                        let color = self.lighting.colors[index];
+                        let selected = self.lighting.selected_color == index;
+                        let response = color_swatch(ui, color, selected);
+                        if response.clicked() {
+                            self.lighting.selected_color = index;
+                            self.save_config_snapshot();
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                let mut color_changed = false;
+                if let Some(color) = self.lighting.colors.get_mut(self.lighting.selected_color) {
+                    color_changed = ui.color_edit_button_srgba(color).changed();
+                }
+                if color_changed {
+                    self.save_config_snapshot();
+                }
 
                 ui.add_space(8.0);
                 section_label(ui, "BRIGHTNESS");
