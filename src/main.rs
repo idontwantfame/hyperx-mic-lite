@@ -3690,7 +3690,7 @@ impl MicLiteApp {
         self.drain_hid_events();
         self.refresh_status_periodic();
         self.refresh_input_peak();
-        ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
             let pattern_width = 210.0;
             let gap = 12.0;
             let stage_width = (ui.available_width() - pattern_width - gap).max(420.0);
@@ -3703,12 +3703,12 @@ impl MicLiteApp {
             });
         });
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.allocate_ui(egui::vec2(300.0, ui.available_height()), |ui| {
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            ui.allocate_ui(egui::vec2(285.0, 320.0), |ui| {
                 self.ui_audio_panel(ui);
             });
             ui.add_space(18.0);
-            ui.allocate_ui(egui::vec2(530.0, ui.available_height()), |ui| {
+            ui.allocate_ui(egui::vec2(620.0, 320.0), |ui| {
                 self.ui_lighting_panel(ui);
             });
         });
@@ -3792,7 +3792,7 @@ impl MicLiteApp {
             ui.vertical(|ui| {
                 section_label(ui, "LIGHTING");
                 ui.horizontal(|ui| {
-                    ui.allocate_ui(egui::vec2(115.0, 185.0), |ui| {
+                    ui.allocate_ui(egui::vec2(120.0, 180.0), |ui| {
                         section_label(ui, "EFFECTS");
                         for effect in [
                             Effect::Wave,
@@ -3814,7 +3814,7 @@ impl MicLiteApp {
                     });
 
                     ui.add_space(12.0);
-                    ui.allocate_ui(egui::vec2(340.0, 185.0), |ui| {
+                    ui.allocate_ui(egui::vec2(430.0, 180.0), |ui| {
                         section_label(ui, "TARGET");
                         let mut target_changed = false;
                         ui.horizontal(|ui| {
@@ -3932,7 +3932,7 @@ impl MicLiteApp {
             });
         });
         ui.add_space(6.0);
-        ui.label(pattern_description(self.polar_pattern));
+        ui.small(pattern_description(self.polar_pattern));
     }
 
     fn ui_mic_stage(&self, ui: &mut egui::Ui) {
