@@ -314,6 +314,7 @@ struct LightingProgram {
     colors: Vec<[u8; 3]>,
     speed: u8,
     brightness: u8,
+    shared_peak_bits: Option<Arc<AtomicU32>>,
 }
 
 const LIGHTING_CELL_COUNT: usize = 16;
@@ -356,8 +357,16 @@ struct AudioPeakMonitor {
 
 impl AudioPeakMonitor {
     fn peak(&self) -> f32 {
-        f32::from_bits(self.peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0)
+        peak_from_bits(&self.peak_bits)
     }
+
+    fn peak_bits(&self) -> Arc<AtomicU32> {
+        self.peak_bits.clone()
+    }
+}
+
+fn peak_from_bits(peak_bits: &AtomicU32) -> f32 {
+    f32::from_bits(peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0)
 }
 
 struct MicLiteApp {
@@ -2047,6 +2056,7 @@ fn run_lighting_solid(args: &[String]) {
         colors: vec![color],
         speed: 75,
         brightness: 100,
+        shared_peak_bits: None,
     };
 
     match stream_lighting_program(
@@ -2119,6 +2129,7 @@ fn run_lighting_effect(args: &[String]) {
         },
         speed: config.lighting.speed,
         brightness: config.lighting.brightness,
+        shared_peak_bits: None,
     };
 
     match stream_lighting_program(&program, stream_duration, packet_log) {
@@ -2544,7 +2555,8 @@ fn stream_lighting_program_cancelable(
     let mut vu_level = 0.18f32;
     let mut vu_tick = 0u32;
     let mut meter_error_logged = false;
-    let capture_monitor = if program.effect == Effect::VuMeter {
+    let capture_monitor = if program.effect == Effect::VuMeter && program.shared_peak_bits.is_none()
+    {
         match start_audio_peak_monitor() {
             Ok(monitor) => {
                 log_event("info", "lighting.vu.capture.start", &[]);
@@ -2556,6 +2568,9 @@ fn stream_lighting_program_cancelable(
             }
         }
     } else {
+        if program.effect == Effect::VuMeter {
+            log_event("info", "lighting.vu.capture.shared", &[]);
+        }
         None
     };
 
@@ -2570,7 +2585,9 @@ fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if program.effect == Effect::VuMeter {
-            let direct_peak = if let Some(monitor) = &capture_monitor {
+            let direct_peak = if let Some(peak_bits) = &program.shared_peak_bits {
+                peak_from_bits(peak_bits)
+            } else if let Some(monitor) = &capture_monitor {
                 monitor.peak()
             } else {
                 0.0
@@ -2596,6 +2613,18 @@ fn stream_lighting_program_cancelable(
             let target = vu_target_level(direct_peak.max(endpoint_peak));
             vu_level = smooth_vu_level(vu_level, target);
             vu_tick = vu_tick.wrapping_add(1);
+            if vu_tick % 50 == 0 {
+                log_event(
+                    "info",
+                    "lighting.vu.level",
+                    &[
+                        ("direct", format!("{direct_peak:.4}")),
+                        ("endpoint", format!("{endpoint_peak:.4}")),
+                        ("target", format!("{target:.3}")),
+                        ("level", format!("{vu_level:.3}")),
+                    ],
+                );
+            }
             build_vu_frame(vu_level, program.brightness, vu_tick)
         } else {
             let frame = frames[index % frames.len()];
@@ -3299,6 +3328,13 @@ impl MicLiteApp {
                 .collect(),
             speed: self.lighting.speed,
             brightness: self.lighting.brightness,
+            shared_peak_bits: if self.lighting.effect == Effect::VuMeter {
+                self.input_monitor
+                    .as_ref()
+                    .map(|monitor| monitor.peak_bits())
+            } else {
+                None
+            },
         };
         self.lighting_message = format!(
             "Applying {} to microphone. It will keep running while this app is open.",
