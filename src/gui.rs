@@ -664,8 +664,8 @@ impl MicLiteApp {
         let painter = ui.painter_at(rect);
 
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
-        let pattern_width = 250.0_f32.min(rect.width() * 0.32).max(210.0);
-        let pattern_inset = (rect.width() * 0.08).clamp(42.0, 92.0);
+        let pattern_width = 235.0_f32.min(rect.width() * 0.29).max(205.0);
+        let pattern_inset = (rect.width() * 0.18).clamp(120.0, 190.0);
         let pattern_left = rect.right() - pattern_width - pattern_inset;
         let mic_area_right = pattern_left - 18.0;
         let center = egui::pos2((rect.left() + mic_area_right) * 0.5, rect.center().y);
