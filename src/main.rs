@@ -279,6 +279,19 @@ struct LightingDevice {
     product: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct ServiceHealth {
+    schema_version: u32,
+    service_name: String,
+    state: String,
+    pid: u32,
+    updated_at: String,
+    heartbeat_count: u64,
+    restore_on_startup: bool,
+    last_restore: Option<String>,
+    last_error: Option<String>,
+}
+
 struct MicLiteApp {
     tab: Tab,
     status: Option<MicStatus>,
@@ -295,6 +308,22 @@ struct MicLiteApp {
     lighting_device: Option<LightingDevice>,
     lighting_message: String,
     lighting_cancel: Option<Arc<AtomicBool>>,
+}
+
+impl ServiceHealth {
+    fn new(state: &str) -> Self {
+        Self {
+            schema_version: 1,
+            service_name: SERVICE_NAME.to_string(),
+            state: state.to_string(),
+            pid: process::id(),
+            updated_at: log_timestamp(),
+            heartbeat_count: 0,
+            restore_on_startup: false,
+            last_restore: None,
+            last_error: None,
+        }
+    }
 }
 
 struct ComApartment;
@@ -572,6 +601,10 @@ fn json_string(value: &str) -> String {
 
 fn log_file_path() -> PathBuf {
     app_data_dir().join("logs").join("app.log")
+}
+
+fn service_health_path() -> PathBuf {
+    app_data_dir().join("service-health.json")
 }
 
 fn run() -> WinResult<()> {
@@ -867,6 +900,13 @@ fn export_diagnostics_bundle(destination: &Path) -> Result<(), String> {
         &destination.join("lighting-hid.json"),
         &collect_lighting_hid_diagnostics(),
     )?;
+    write_json_file(
+        &destination.join("service-health.json"),
+        &match read_service_health() {
+            Ok(health) => serde_json::json!(health),
+            Err(error) => serde_json::json!({ "error": error }),
+        },
+    )?;
 
     println!("Exported diagnostics bundle to {}", destination.display());
     log_event(
@@ -1043,12 +1083,16 @@ fn stop_installed_service() -> Result<(), String> {
 fn print_installed_service_status() -> Result<(), String> {
     let service = open_installed_service(ServiceAccess::QUERY_STATUS)?;
     let status = service.query_status().map_err(windows_service_error)?;
+    let output = serde_json::json!({
+        "name": SERVICE_NAME,
+        "display_name": SERVICE_DISPLAY_NAME,
+        "state": service_state_label(status.current_state),
+        "pid": status.process_id.unwrap_or(0),
+        "health": read_service_health().ok(),
+    });
     println!(
-        "{{\"name\":\"{}\",\"display_name\":\"{}\",\"state\":\"{}\",\"pid\":{}}}",
-        SERVICE_NAME,
-        SERVICE_DISPLAY_NAME,
-        service_state_label(status.current_state),
-        status.process_id.unwrap_or(0)
+        "{}",
+        serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
     );
     Ok(())
 }
@@ -1060,11 +1104,24 @@ fn run_windows_service() -> Result<(), windows_service::Error> {
 
 fn run_service_worker_console() -> Result<(), String> {
     println!("Running service worker in console mode. Press Ctrl+C to stop.");
+    let mut health = ServiceHealth::new("console_running");
     restore_service_settings()?;
+    health.last_restore = Some(log_timestamp());
+    health.restore_on_startup = load_or_create_config()
+        .map(|config| config.service.restore_on_startup)
+        .unwrap_or(false);
+    let _ = write_service_health(&health);
     log_event("info", "service.console.running", &[]);
     loop {
         thread::sleep(Duration::from_secs(5));
-        log_event("info", "service.console.heartbeat", &[]);
+        health.heartbeat_count += 1;
+        health.updated_at = log_timestamp();
+        let _ = write_service_health(&health);
+        log_event(
+            "info",
+            "service.console.heartbeat",
+            &[("count", health.heartbeat_count.to_string())],
+        );
     }
 }
 
@@ -1089,12 +1146,21 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
         Duration::from_secs(10),
     )?;
 
+    let mut health = ServiceHealth::new("starting");
+    health.restore_on_startup = load_or_create_config()
+        .map(|config| config.service.restore_on_startup)
+        .unwrap_or(false);
+    let _ = write_service_health(&health);
+
     if let Err(error) = restore_service_settings() {
+        health.last_error = Some(error.to_string());
         log_event(
             "error",
             "service.restore.error",
             &[("message", error.to_string())],
         );
+    } else {
+        health.last_restore = Some(log_timestamp());
     }
 
     set_service_status(
@@ -1103,13 +1169,23 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
         0,
         Duration::default(),
     )?;
+    health.state = "running".to_string();
+    health.updated_at = log_timestamp();
+    let _ = write_service_health(&health);
     log_event("info", "service.running", &[]);
 
     loop {
         match shutdown_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                log_event("info", "service.heartbeat", &[]);
+                health.heartbeat_count += 1;
+                health.updated_at = log_timestamp();
+                let _ = write_service_health(&health);
+                log_event(
+                    "info",
+                    "service.heartbeat",
+                    &[("count", health.heartbeat_count.to_string())],
+                );
             }
         }
     }
@@ -1120,6 +1196,9 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
         1,
         Duration::from_secs(5),
     )?;
+    health.state = "stop_pending".to_string();
+    health.updated_at = log_timestamp();
+    let _ = write_service_health(&health);
     log_event("info", "service.stopping", &[]);
     set_service_status(
         &status_handle,
@@ -1127,6 +1206,9 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
         0,
         Duration::default(),
     )?;
+    health.state = "stopped".to_string();
+    health.updated_at = log_timestamp();
+    let _ = write_service_health(&health);
     log_event("info", "service.stopped", &[]);
     Ok(())
 }
@@ -1188,6 +1270,21 @@ fn update_service_config(enabled: bool) -> Result<(), String> {
     let mut config = load_or_create_config()?;
     config.service.enabled = enabled;
     save_config(&config)
+}
+
+fn read_service_health() -> Result<ServiceHealth, String> {
+    let path = service_health_path();
+    let text = fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn write_service_health(health: &ServiceHealth) -> Result<(), String> {
+    let path = service_health_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(health).map_err(|error| error.to_string())?;
+    fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 fn service_state_label(state: ServiceState) -> &'static str {
@@ -1670,12 +1767,13 @@ fn lighting_device_score(device: &hidapi::DeviceInfo) -> (u8, u8, u8, i32) {
 }
 
 fn run_lighting_solid(args: &[String]) {
+    let (args, packet_log) = split_packet_log_flag(args);
     if args.is_empty() || args.len() > 2 {
-        eprintln!("Usage: hyperx-mic-lite lighting-solid ff0066 [seconds]");
+        eprintln!("Usage: hyperx-mic-lite lighting-solid ff0066 [seconds] [--packet-log]");
         process::exit(2);
     }
 
-    let color = parse_rgb_hex(&args[0]).unwrap_or_else(|error| {
+    let color = parse_rgb_hex(args[0]).unwrap_or_else(|error| {
         eprintln!("{error}");
         process::exit(2);
     });
@@ -1701,6 +1799,7 @@ fn run_lighting_solid(args: &[String]) {
     match stream_lighting_program(
         &program,
         StreamDuration::Timed(Duration::from_secs(seconds)),
+        packet_log,
     ) {
         Ok(()) => {
             log_event(
@@ -1732,14 +1831,15 @@ fn run_lighting_solid(args: &[String]) {
 }
 
 fn run_lighting_effect(args: &[String]) {
+    let (args, packet_log) = split_packet_log_flag(args);
     if args.is_empty() || args.len() > 2 {
         eprintln!(
-            "Usage: hyperx-mic-lite lighting-effect <solid|wave|cycle|pulse|blink|lightning|vu_meter> [seconds]"
+            "Usage: hyperx-mic-lite lighting-effect <solid|wave|cycle|pulse|blink|lightning|vu_meter> [seconds|forever] [--packet-log]"
         );
         process::exit(2);
     }
 
-    let effect = Effect::from_config(&args[0]);
+    let effect = Effect::from_config(args[0]);
     let stream_duration = args
         .get(1)
         .map(|value| parse_stream_duration(value))
@@ -1767,7 +1867,7 @@ fn run_lighting_effect(args: &[String]) {
         brightness: config.lighting.brightness,
     };
 
-    match stream_lighting_program(&program, stream_duration) {
+    match stream_lighting_program(&program, stream_duration, packet_log) {
         Ok(()) => println!("Streamed {}", effect.label()),
         Err(error) => {
             log_event(
@@ -1779,6 +1879,19 @@ fn run_lighting_effect(args: &[String]) {
             process::exit(1);
         }
     }
+}
+
+fn split_packet_log_flag(args: &[String]) -> (Vec<&str>, bool) {
+    let mut packet_log = false;
+    let mut filtered = Vec::new();
+    for arg in args {
+        if arg == "--packet-log" || arg == "--verbose-hid" {
+            packet_log = true;
+        } else {
+            filtered.push(arg.as_str());
+        }
+    }
+    (filtered, packet_log)
 }
 
 fn parse_stream_duration(value: &str) -> Result<StreamDuration, String> {
@@ -2046,14 +2159,16 @@ fn color_to_hex(color: egui::Color32) -> String {
 fn stream_lighting_program(
     program: &LightingProgram,
     duration: StreamDuration,
+    packet_log: bool,
 ) -> Result<(), String> {
-    stream_lighting_program_cancelable(program, duration, None)
+    stream_lighting_program_cancelable(program, duration, None, packet_log)
 }
 
 fn stream_lighting_program_cancelable(
     program: &LightingProgram,
     duration: StreamDuration,
     cancel: Option<Arc<AtomicBool>>,
+    packet_log: bool,
 ) -> Result<(), String> {
     let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
     let info = api
@@ -2092,8 +2207,8 @@ fn stream_lighting_program_cancelable(
             index += 1;
             frame
         };
-        send_feature_packet(&device, &header)?;
-        send_feature_packet(&device, &build_frame_packet(frame))?;
+        send_feature_packet(&device, &header, packet_log)?;
+        send_feature_packet(&device, &build_frame_packet(frame), packet_log)?;
         thread::sleep(frame_delay);
     }
 
@@ -2273,37 +2388,89 @@ fn scale_color(color: [u8; 3], percent: u8) -> [u8; 3] {
     ]
 }
 
-fn send_feature_packet(device: &hidapi::HidDevice, packet: &[u8; 64]) -> Result<(), String> {
+fn send_feature_packet(
+    device: &hidapi::HidDevice,
+    packet: &[u8; 64],
+    packet_log: bool,
+) -> Result<(), String> {
     let mut with_report_id = [0u8; 65];
     with_report_id[1..].copy_from_slice(packet);
 
     let mut errors = Vec::new();
 
     if let Err(error) = device.send_feature_report(&with_report_id) {
+        log_hid_packet_attempt(
+            packet_log,
+            "feature+id",
+            false,
+            packet,
+            Some(error.to_string()),
+        );
         errors.push(format!("feature+id: {error}"));
     } else {
+        log_hid_packet_attempt(packet_log, "feature+id", true, packet, None);
         return Ok(());
     }
 
     if let Err(error) = device.send_feature_report(packet) {
+        log_hid_packet_attempt(
+            packet_log,
+            "feature",
+            false,
+            packet,
+            Some(error.to_string()),
+        );
         errors.push(format!("feature: {error}"));
     } else {
+        log_hid_packet_attempt(packet_log, "feature", true, packet, None);
         return Ok(());
     }
 
     if let Err(error) = device.write(&with_report_id) {
+        log_hid_packet_attempt(
+            packet_log,
+            "output+id",
+            false,
+            packet,
+            Some(error.to_string()),
+        );
         errors.push(format!("output+id: {error}"));
     } else {
+        log_hid_packet_attempt(packet_log, "output+id", true, packet, None);
         return Ok(());
     }
 
     if let Err(error) = device.write(packet) {
+        log_hid_packet_attempt(packet_log, "output", false, packet, Some(error.to_string()));
         errors.push(format!("output: {error}"));
     } else {
+        log_hid_packet_attempt(packet_log, "output", true, packet, None);
         return Ok(());
     }
 
     Err(errors.join("; "))
+}
+
+fn log_hid_packet_attempt(
+    enabled: bool,
+    transport: &str,
+    success: bool,
+    packet: &[u8; 64],
+    error: Option<String>,
+) {
+    if !enabled {
+        return;
+    }
+
+    let mut fields = vec![
+        ("transport", transport.to_string()),
+        ("success", success.to_string()),
+        ("packet", hex_bytes(packet)),
+    ];
+    if let Some(error) = error {
+        fields.push(("error", error));
+    }
+    log_event("info", "hid.packet.write", &fields);
 }
 
 impl MicLiteApp {
@@ -2499,6 +2666,7 @@ impl MicLiteApp {
                 &program,
                 StreamDuration::Forever,
                 Some(cancel),
+                false,
             ) {
                 Ok(()) => log_event(
                     "info",

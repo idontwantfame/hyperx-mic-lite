@@ -7,7 +7,7 @@
 - Register a proper Event Viewer message source during service/app install so events render friendly messages instead of raw provider records.
 - [x] Add crash/panic capture with a useful report path and enough context to debug failures.
 - [x] Add a CLI command to export a diagnostics bundle with logs, device info, HID report sizes, app version, and recent settings.
-- Add a debug/verbose flag for packet-level HID logging during protocol work.
+- [x] Add a debug/verbose flag for packet-level HID logging during protocol work.
 
 ## Configuration Management
 
@@ -22,7 +22,7 @@
 - [x] Add CLI commands to install, uninstall, start, stop, and query a Windows service.
 - Define what the service owns: startup restore, lighting loop/effects, HID monitoring, and optional tray/GUI handoff.
 - [x] Add clear permission/admin handling for service installation.
-- Add service logs and health/status reporting.
+- [x] Add service logs and health/status reporting.
 
 ## UI Polish
 

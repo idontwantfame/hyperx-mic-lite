@@ -76,6 +76,7 @@ Use it:
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect cycle 10
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect vu_meter 10
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect vu_meter forever
+.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect wave 5 --packet-log
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe gui
 ```
 
@@ -100,7 +101,7 @@ Logs:
 
 Important lifecycle and failure events are also written to the Windows Application event log with provider `HyperXMicLite`.
 
-Diagnostics export creates a folder containing a manifest, redacted config, recent app log, Core Audio device/status JSON, and HID report-size details for supported lighting interfaces.
+Diagnostics export creates a folder containing a manifest, redacted config, recent app log, service health, Core Audio device/status JSON, and HID report-size details for supported lighting interfaces. Use `--packet-log` on lighting commands when protocol work needs packet-level HID write logs.
 
 Windows service:
 
@@ -112,7 +113,7 @@ Windows service:
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service uninstall
 ```
 
-Install/uninstall normally require an elevated terminal. The installed service auto-starts and currently restores configured microphone volume/mute state when `service.restore_on_startup` is enabled in the config. Windows services run in Session 0, so they do not show the GUI on your desktop.
+Install/uninstall normally require an elevated terminal. The installed service auto-starts and currently restores configured microphone volume/mute state when `service.restore_on_startup` is enabled in the config. Windows services run in Session 0, so they do not show the GUI on your desktop. `service status` includes the Windows SCM state plus the app's last service health heartbeat when available.
 
 Per-user GUI startup:
 
