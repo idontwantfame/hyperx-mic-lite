@@ -40,4 +40,6 @@
 - [x] Add live/muted lighting behavior that follows HID mute reports.
 - [x] Capture and document native solid-color lighting writes with USBPcap/Wireshark.
 - [x] Capture and document native mic gain and mode-dial behavior with USBPcap/Wireshark.
-- Capture native mic monitoring, VU Meter, Wave, and any hidden controls with USBPcap/Wireshark.
+- [x] Capture and document native mic monitoring, headphone volume, mic volume, and toggle USB Audio Class writes.
+- Add USB Audio Class control writes for mic monitoring, headphone volume, mic volume, and their mute toggles.
+- Capture native VU Meter, Wave, and any hidden controls with USBPcap/Wireshark.
