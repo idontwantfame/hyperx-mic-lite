@@ -369,7 +369,9 @@ struct MicLiteApp {
     headphone_volume: u8,
     mute_on_app_start: bool,
     input_peak: f32,
+    input_monitor: Option<AudioPeakMonitor>,
     last_peak_update: Instant,
+    last_status_update: Instant,
     polar_pattern: PolarPattern,
     hid_events: Receiver<HidEvent>,
     lighting: LightingState,
@@ -3044,7 +3046,18 @@ impl MicLiteApp {
             headphone_volume: config.audio.headphone_volume,
             mute_on_app_start: config.audio.mute_on_app_start,
             input_peak: 0.0,
+            input_monitor: match start_audio_peak_monitor() {
+                Ok(monitor) => {
+                    log_event("info", "gui.audio.capture.start", &[]);
+                    Some(monitor)
+                }
+                Err(error) => {
+                    log_event("warn", "gui.audio.capture.error", &[("message", error)]);
+                    None
+                }
+            },
             last_peak_update: Instant::now(),
+            last_status_update: Instant::now(),
             polar_pattern: PolarPattern::Unknown(255),
             hid_events: spawn_hid_event_listener(),
             lighting: LightingState {
@@ -3156,7 +3169,9 @@ impl MicLiteApp {
             return;
         }
         self.last_peak_update = Instant::now();
-        if let Ok(peak) = input_peak_value() {
+        if let Some(monitor) = &self.input_monitor {
+            self.input_peak = monitor.peak().clamp(0.0, 1.0);
+        } else if let Ok(peak) = input_peak_value() {
             self.input_peak = peak.clamp(0.0, 1.0);
         }
     }
@@ -3170,6 +3185,14 @@ impl MicLiteApp {
             }
             Err(error) => self.status_error = Some(error.to_string()),
         }
+    }
+
+    fn refresh_status_periodic(&mut self) {
+        if self.last_status_update.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_status_update = Instant::now();
+        self.refresh_status();
     }
 
     fn set_mute(&mut self, muted: bool) {
@@ -3201,10 +3224,14 @@ impl MicLiteApp {
     }
 
     fn apply_live_mute_lighting(&mut self, is_live: bool) {
-        if let Some(cancel) = &self.lighting_cancel {
-            cancel.store(true, Ordering::Relaxed);
+        if self.lighting_cancel.is_some() {
+            log_event(
+                "info",
+                "lighting.live_mute.skip_active_stream",
+                &[("live", is_live.to_string())],
+            );
+            return;
         }
-        self.lighting_cancel = None;
         let color = live_mute_lighting_color(is_live);
         let brightness = self.lighting.brightness;
         self.lighting_message = if is_live {
@@ -3313,6 +3340,7 @@ impl MicLiteApp {
 
     fn ui_audio(&mut self, ui: &mut egui::Ui) {
         self.drain_hid_events();
+        self.refresh_status_periodic();
         self.refresh_input_peak();
         let muted = self.status.as_ref().is_some_and(|status| status.muted);
         ui.vertical(|ui| {
@@ -3403,6 +3431,7 @@ impl MicLiteApp {
 
     fn ui_lights(&mut self, ui: &mut egui::Ui) {
         self.drain_hid_events();
+        self.refresh_status_periodic();
         ui.vertical(|ui| {
             self.ui_mic_stage(ui);
             ui.separator();
