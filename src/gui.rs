@@ -664,8 +664,10 @@ impl MicLiteApp {
         let painter = ui.painter_at(rect);
 
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
-        let pattern_width = 260.0_f32.min(rect.width() * 0.34).max(210.0);
-        let mic_area_right = rect.right() - pattern_width - 14.0;
+        let pattern_width = 250.0_f32.min(rect.width() * 0.32).max(210.0);
+        let pattern_inset = (rect.width() * 0.08).clamp(42.0, 92.0);
+        let pattern_left = rect.right() - pattern_width - pattern_inset;
+        let mic_area_right = pattern_left - 18.0;
         let center = egui::pos2((rect.left() + mic_area_right) * 0.5, rect.center().y);
         let glow_radius = rect.height() * 0.36;
         for (index, color) in self.lighting.colors.iter().enumerate() {
@@ -698,8 +700,8 @@ impl MicLiteApp {
         }
 
         let pattern_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - pattern_width - 12.0, rect.top() + 10.0),
-            egui::pos2(rect.right() - 10.0, rect.bottom() - 10.0),
+            egui::pos2(pattern_left, rect.top() + 10.0),
+            egui::pos2(pattern_left + pattern_width, rect.bottom() - 10.0),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(pattern_rect), |ui| {
             self.ui_pattern_panel(ui);
