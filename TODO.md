@@ -4,7 +4,7 @@
 
 - [x] Add structured app logging for startup, shutdown, device detection, HID events, audio changes, lighting writes, warnings, and errors.
 - [x] Add Windows Event Viewer logging for important lifecycle and failure events.
-- Register a proper Event Viewer message source during service/app install so events render friendly messages instead of raw provider records.
+- [x] Register a proper Event Viewer message source during service/app install so events render friendly messages instead of raw provider records.
 - [x] Add crash/panic capture with a useful report path and enough context to debug failures.
 - [x] Add a CLI command to export a diagnostics bundle with logs, device info, HID report sizes, app version, and recent settings.
 - [x] Add a debug/verbose flag for packet-level HID logging during protocol work.

@@ -27,7 +27,10 @@ use windows_service::{
     service_dispatcher,
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
-use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+use winreg::{
+    RegKey,
+    enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ},
+};
 
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 const APP_NAME: &str = "HyperXMicLite";
@@ -37,6 +40,10 @@ const SERVICE_DESCRIPTION: &str =
     "Restores HyperX Mic Lite microphone settings and hosts background device tasks.";
 const STARTUP_VALUE_NAME: &str = "HyperXMicLite";
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const EVENTLOG_SOURCE_PATH: &str =
+    r"SYSTEM\CurrentControlSet\Services\EventLog\Application\HyperXMicLite";
+const EVENTLOG_TYPES_SUPPORTED: u32 = 0x0007;
+const EVENTLOG_MESSAGE_ID: u32 = 0x40000001;
 use windows::{
     Win32::{
         Devices::{
@@ -555,18 +562,8 @@ fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
 }
 
 fn event_id_for(event: &str) -> u32 {
-    match event {
-        "app.start" => 1000,
-        "app.exit" => 1001,
-        "gui.start" => 1010,
-        "gui.exit" => 1011,
-        "app.error" => 2000,
-        "app.panic" => 2001,
-        "gui.error" => 2010,
-        "lighting.detect.none" => 3000,
-        "lighting.solid.error" => 3001,
-        _ => 1999,
-    }
+    let _ = event;
+    EVENTLOG_MESSAGE_ID
 }
 
 fn write_crash_report(message: &str, location: &str) -> Result<PathBuf, String> {
@@ -628,6 +625,7 @@ fn run() -> WinResult<()> {
         "config" => run_config_command(&args[1..]),
         "logs" => run_logs_command(&args[1..]),
         "diagnostics" => run_diagnostics_command(&args[1..]),
+        "eventlog" => run_eventlog_command(&args[1..]),
         "service" => run_service_command(&args[1..]),
         "startup" => run_startup_command(&args[1..]),
         "service-run" => {
@@ -681,6 +679,7 @@ Usage:\n\
   hyperx-mic-lite config <path|dump|export|import|validate|reset>\n\
   hyperx-mic-lite logs <path|tail>\n\
   hyperx-mic-lite diagnostics export [directory]\n\
+  hyperx-mic-lite eventlog <register|unregister|status>\n\
   hyperx-mic-lite service <install|uninstall|start|stop|status|run>\n\
   hyperx-mic-lite startup <install|uninstall|status>\n\
   hyperx-mic-lite gui"
@@ -776,6 +775,121 @@ fn print_user_gui_startup_status() -> Result<(), String> {
             Ok(())
         }
         Err(error) => Err(error.to_string()),
+    }
+}
+
+fn run_eventlog_command(args: &[String]) {
+    if args.is_empty() {
+        eventlog_usage();
+        process::exit(2);
+    }
+
+    let result = match args[0].as_str() {
+        "register" => register_event_log_source().map(|path| {
+            println!("Registered Event Viewer source at {path}");
+        }),
+        "unregister" => unregister_event_log_source().map(|_| {
+            println!("Unregistered Event Viewer source {APP_NAME}.");
+        }),
+        "status" => print_event_log_source_status(),
+        _ => {
+            eventlog_usage();
+            process::exit(2);
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("{error}");
+        log_event("error", "eventlog.command.error", &[("message", error)]);
+        process::exit(1);
+    }
+}
+
+fn eventlog_usage() {
+    eprintln!(
+        "Usage:\n\
+  hyperx-mic-lite eventlog register\n\
+  hyperx-mic-lite eventlog unregister\n\
+  hyperx-mic-lite eventlog status"
+    );
+}
+
+fn register_event_log_source() -> Result<String, String> {
+    let executable_path = env::current_exe()
+        .map_err(|error| error.to_string())?
+        .display()
+        .to_string();
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let (source_key, _) = hklm
+        .create_subkey(EVENTLOG_SOURCE_PATH)
+        .map_err(registry_admin_error)?;
+    source_key
+        .set_value("EventMessageFile", &executable_path)
+        .map_err(registry_admin_error)?;
+    source_key
+        .set_value("TypesSupported", &EVENTLOG_TYPES_SUPPORTED)
+        .map_err(registry_admin_error)?;
+    source_key
+        .set_value("CustomSource", &1u32)
+        .map_err(registry_admin_error)?;
+    log_event(
+        "info",
+        "eventlog.source.register",
+        &[("message_file", executable_path.clone())],
+    );
+    Ok(executable_path)
+}
+
+fn unregister_event_log_source() -> Result<(), String> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    match hklm.delete_subkey_all(EVENTLOG_SOURCE_PATH) {
+        Ok(()) => {
+            log_event("info", "eventlog.source.unregister", &[]);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(registry_admin_error(error)),
+    }
+}
+
+fn print_event_log_source_status() -> Result<(), String> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    match hklm.open_subkey_with_flags(EVENTLOG_SOURCE_PATH, KEY_READ) {
+        Ok(source_key) => {
+            let message_file = source_key
+                .get_value::<String, _>("EventMessageFile")
+                .unwrap_or_default();
+            let types_supported = source_key
+                .get_value::<u32, _>("TypesSupported")
+                .unwrap_or_default();
+            let output = serde_json::json!({
+                "registered": true,
+                "source": APP_NAME,
+                "registry_path": format!("HKLM\\{EVENTLOG_SOURCE_PATH}"),
+                "event_message_file": message_file,
+                "types_supported": types_supported,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "{{\"registered\":false,\"source\":{}}}",
+                json_string(APP_NAME)
+            );
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn registry_admin_error(error: std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(5) => "Access denied. Run this command from an elevated terminal.".to_string(),
+        _ => error.to_string(),
     }
 }
 
@@ -1035,8 +1149,11 @@ fn install_windows_service() -> Result<(), String> {
     service
         .set_description(SERVICE_DESCRIPTION)
         .map_err(windows_service_error)?;
+    let event_message_file = register_event_log_source()?;
     update_service_config(true)?;
-    println!("Installed {SERVICE_DISPLAY_NAME} as auto-start service.");
+    println!(
+        "Installed {SERVICE_DISPLAY_NAME} as auto-start service. Event Viewer source uses {event_message_file}."
+    );
     log_event("info", "service.install", &[]);
     Ok(())
 }

@@ -97,9 +97,16 @@ Logs:
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe logs path
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe logs tail 80
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe diagnostics export
+.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe eventlog status
 ```
 
-Important lifecycle and failure events are also written to the Windows Application event log with provider `HyperXMicLite`.
+Important lifecycle and failure events are also written to the Windows Application event log with provider `HyperXMicLite`. To make Event Viewer render friendly messages, register the source once from an elevated terminal:
+
+```powershell
+.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe eventlog register
+```
+
+`service install` also registers this Event Viewer source automatically.
 
 Diagnostics export creates a folder containing a manifest, redacted config, recent app log, service health, Core Audio device/status JSON, and HID report-size details for supported lighting interfaces. Use `--packet-log` on lighting commands when protocol work needs packet-level HID write logs.
 
