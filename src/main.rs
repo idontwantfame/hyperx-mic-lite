@@ -331,6 +331,8 @@ struct MicLiteApp {
     lighting_device: Option<LightingDevice>,
     lighting_message: String,
     lighting_cancel: Option<Arc<AtomicBool>>,
+    start_minimized: bool,
+    start_minimized_applied: bool,
 }
 
 impl ServiceHealth {
@@ -656,7 +658,7 @@ fn run() -> WinResult<()> {
                 process::exit(1);
             }
         }
-        "gui" => run_gui(),
+        "gui" => run_gui(&args[1..]),
         "mute" => {
             set_mic_mute(true)?;
             print_status_json(&mic_status()?);
@@ -704,7 +706,7 @@ Usage:\n\
   hyperx-mic-lite eventlog <register|unregister|status>\n\
   hyperx-mic-lite service <install|uninstall|start|stop|status|run>\n\
   hyperx-mic-lite startup <install|uninstall|status>\n\
-  hyperx-mic-lite gui"
+  hyperx-mic-lite gui [--start-minimized]"
     );
 }
 
@@ -715,7 +717,7 @@ fn run_startup_command(args: &[String]) {
     }
 
     let result = match args[0].as_str() {
-        "install" => install_user_gui_startup(),
+        "install" => install_user_gui_startup(&args[1..]),
         "uninstall" | "delete" => uninstall_user_gui_startup(),
         "status" => print_user_gui_startup_status(),
         _ => {
@@ -734,15 +736,26 @@ fn run_startup_command(args: &[String]) {
 fn startup_usage() {
     eprintln!(
         "Usage:\n\
-  hyperx-mic-lite startup install\n\
+  hyperx-mic-lite startup install [--minimized|--normal]\n\
   hyperx-mic-lite startup uninstall\n\
   hyperx-mic-lite startup status"
     );
 }
 
-fn install_user_gui_startup() -> Result<(), String> {
+fn install_user_gui_startup(args: &[String]) -> Result<(), String> {
+    let start_minimized = !args.iter().any(|arg| arg == "--normal");
+    if args
+        .iter()
+        .any(|arg| arg != "--minimized" && arg != "--normal")
+    {
+        return Err("Usage: hyperx-mic-lite startup install [--minimized|--normal]".to_string());
+    }
     let executable_path = env::current_exe().map_err(|error| error.to_string())?;
-    let command = format!("\"{}\" gui", executable_path.display());
+    let command = if start_minimized {
+        format!("\"{}\" gui --start-minimized", executable_path.display())
+    } else {
+        format!("\"{}\" gui", executable_path.display())
+    };
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (run_key, _) = hkcu
         .create_subkey(RUN_KEY_PATH)
@@ -2808,7 +2821,7 @@ fn log_hid_packet_attempt(
 }
 
 impl MicLiteApp {
-    fn new() -> Self {
+    fn new(start_minimized: bool) -> Self {
         let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
         let colors = config
             .lighting
@@ -2851,6 +2864,8 @@ impl MicLiteApp {
             lighting_device: detect_lighting_device(),
             lighting_message: String::new(),
             lighting_cancel: None,
+            start_minimized,
+            start_minimized_applied: false,
         };
         app.refresh_status();
         if app.mute_on_app_start {
@@ -3339,6 +3354,12 @@ impl MicLiteApp {
 
 impl eframe::App for MicLiteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.start_minimized && !self.start_minimized_applied {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.start_minimized_applied = true;
+            log_event("info", "gui.start_minimized", &[]);
+        }
         ui.ctx().request_repaint_after(Duration::from_millis(50));
         ui.vertical(|ui| {
             ui.add_space(8.0);
@@ -3439,7 +3460,17 @@ fn draw_microphone(painter: &egui::Painter, center: egui::Pos2, stage_height: f3
     );
 }
 
-fn run_gui() {
+fn run_gui(args: &[String]) {
+    let start_minimized = args
+        .iter()
+        .any(|arg| arg == "--start-minimized" || arg == "--minimized");
+    if args
+        .iter()
+        .any(|arg| arg != "--start-minimized" && arg != "--minimized")
+    {
+        eprintln!("Usage: hyperx-mic-lite gui [--start-minimized]");
+        process::exit(2);
+    }
     log_event("info", "gui.start", &[]);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -3454,7 +3485,7 @@ fn run_gui() {
         options,
         Box::new(|context| {
             context.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(MicLiteApp::new()))
+            Ok(Box::new(MicLiteApp::new(start_minimized)))
         }),
     );
 

@@ -130,11 +130,12 @@ Per-user GUI startup:
 
 ```powershell
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup install
+.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup install --normal
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup status
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup uninstall
 ```
 
-The startup command does not require admin. It launches the GUI for the current Windows user at login.
+The startup command does not require admin. It launches the GUI for the current Windows user at login. `startup install` starts minimized by default; use `--normal` to open the window normally. You can also launch manually with `gui --start-minimized`.
 
 ## Limits
 
