@@ -20,7 +20,7 @@
 ## Background Service
 
 - [x] Add CLI commands to install, uninstall, start, stop, and query a Windows service.
-- Define what the service owns: startup restore, lighting loop/effects, HID monitoring, and optional tray/GUI handoff.
+- [x] Define what the service owns: startup restore, lighting loop/effects, HID monitoring, and optional tray/GUI handoff.
 - [x] Add clear permission/admin handling for service installation.
 - [x] Add service logs and health/status reporting.
 

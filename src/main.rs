@@ -242,6 +242,10 @@ struct UiConfig {
 struct ServiceConfig {
     enabled: bool,
     restore_on_startup: bool,
+    owns_startup_restore: bool,
+    owns_lighting_loop: bool,
+    owns_hid_monitoring: bool,
+    owns_tray_handoff: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -383,6 +387,10 @@ impl Default for AppConfig {
             service: ServiceConfig {
                 enabled: false,
                 restore_on_startup: false,
+                owns_startup_restore: true,
+                owns_lighting_loop: false,
+                owns_hid_monitoring: false,
+                owns_tray_handoff: false,
             },
             device: DeviceConfig {
                 preferred_capture_endpoint_id: None,
@@ -905,6 +913,7 @@ fn run_service_command(args: &[String]) {
         "start" => start_installed_service(),
         "stop" => stop_installed_service(),
         "status" => print_installed_service_status(),
+        "plan" => print_service_ownership_plan(),
         "run" => run_service_worker_console(),
         _ => {
             service_usage();
@@ -927,6 +936,7 @@ fn service_usage() {
   hyperx-mic-lite service start\n\
   hyperx-mic-lite service stop\n\
   hyperx-mic-lite service status\n\
+  hyperx-mic-lite service plan\n\
   hyperx-mic-lite service run"
     );
 }
@@ -1205,6 +1215,7 @@ fn print_installed_service_status() -> Result<(), String> {
         "display_name": SERVICE_DISPLAY_NAME,
         "state": service_state_label(status.current_state),
         "pid": status.process_id.unwrap_or(0),
+        "ownership": service_ownership_plan_json(),
         "health": read_service_health().ok(),
     });
     println!(
@@ -1212,6 +1223,47 @@ fn print_installed_service_status() -> Result<(), String> {
         serde_json::to_string_pretty(&output).map_err(|error| error.to_string())?
     );
     Ok(())
+}
+
+fn print_service_ownership_plan() -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&service_ownership_plan_json())
+            .map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn service_ownership_plan_json() -> serde_json::Value {
+    let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+    serde_json::json!({
+        "service_owns_now": [
+            "install/start/stop/status lifecycle",
+            "boot-time microphone restore when service.restore_on_startup is enabled",
+            "service health heartbeat",
+            "Event Viewer source registration during service install"
+        ],
+        "user_session_owns_now": [
+            "GUI rendering and user interaction",
+            "per-user GUI startup",
+            "interactive lighting effect streams",
+            "physical HID mute/pattern monitoring for UI refresh"
+        ],
+        "planned_service_candidates": [
+            "lighting loop/effects only if we want effects without the GUI running",
+            "HID monitoring only if a future background policy needs physical control events",
+            "tray/GUI handoff via a separate per-user tray process, not directly from the service"
+        ],
+        "current_flags": {
+            "enabled": config.service.enabled,
+            "restore_on_startup": config.service.restore_on_startup,
+            "owns_startup_restore": config.service.owns_startup_restore,
+            "owns_lighting_loop": config.service.owns_lighting_loop,
+            "owns_hid_monitoring": config.service.owns_hid_monitoring,
+            "owns_tray_handoff": config.service.owns_tray_handoff
+        },
+        "decision": "Keep the Windows service small: boot restore and health only. Keep GUI, lighting streams, HID UI refresh, and tray behavior in the logged-in user session until there is a clear reason to move them."
+    })
 }
 
 fn run_windows_service() -> Result<(), windows_service::Error> {

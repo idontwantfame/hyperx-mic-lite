@@ -116,11 +116,14 @@ Windows service:
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service install
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service start
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service status
+.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service plan
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service stop
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service uninstall
 ```
 
 Install/uninstall normally require an elevated terminal. The installed service auto-starts and currently restores configured microphone volume/mute state when `service.restore_on_startup` is enabled in the config. Windows services run in Session 0, so they do not show the GUI on your desktop. `service status` includes the Windows SCM state plus the app's last service health heartbeat when available.
+
+Service ownership is intentionally narrow. The service owns boot-time restore, lifecycle/status, health heartbeat, and Event Viewer setup. The logged-in user session owns GUI rendering, per-user GUI startup, interactive lighting streams, and HID events used for UI refresh. Lighting loops, background HID policies, and tray handoff are left as explicit future candidates rather than hidden service behavior.
 
 Per-user GUI startup:
 
