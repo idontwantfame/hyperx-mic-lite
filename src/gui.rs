@@ -739,22 +739,35 @@ impl MicLiteApp {
                                 let color = self.lighting.colors[index];
                                 let selected = self.lighting.selected_color == index;
                                 let response = color_swatch(ui, color, selected);
-                                if response.clicked() {
+                                let popup_id = response.id.with("color_picker");
+                                if response.double_clicked() {
+                                    self.lighting.selected_color = index;
+                                    egui::Popup::open_id(ui.ctx(), popup_id);
+                                    self.save_config_snapshot();
+                                } else if response.clicked() {
+                                    self.lighting.selected_color = index;
+                                    self.save_config_snapshot();
+                                }
+
+                                let mut color_changed = false;
+                                egui::Popup::from_response(&response)
+                                    .id(popup_id)
+                                    .open_memory(None)
+                                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                    .show(|ui| {
+                                        ui.spacing_mut().slider_width = 275.0;
+                                        color_changed = egui::color_picker::color_picker_color32(
+                                            ui,
+                                            &mut self.lighting.colors[index],
+                                            egui::color_picker::Alpha::Opaque,
+                                        );
+                                    });
+                                if color_changed {
                                     self.lighting.selected_color = index;
                                     self.save_config_snapshot();
                                 }
                             }
                         });
-                        ui.add_space(6.0);
-                        let mut color_changed = false;
-                        if let Some(color) =
-                            self.lighting.colors.get_mut(self.lighting.selected_color)
-                        {
-                            color_changed = ui.color_edit_button_srgba(color).changed();
-                        }
-                        if color_changed {
-                            self.save_config_snapshot();
-                        }
 
                         ui.add_space(8.0);
                         section_label(ui, "BRIGHTNESS");
