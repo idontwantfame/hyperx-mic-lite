@@ -8,11 +8,12 @@ use std::{
     ffi::{CStr, OsString},
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    mem,
     path::{Path, PathBuf},
     process,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
         mpsc::{self, Receiver},
     },
     thread,
@@ -45,6 +46,13 @@ const EVENTLOG_SOURCE_PATH: &str =
     r"SYSTEM\CurrentControlSet\Services\EventLog\Application\HyperXMicLite";
 const EVENTLOG_TYPES_SUPPORTED: u32 = 0x0007;
 const EVENTLOG_MESSAGE_ID: u32 = 0x40000001;
+const TRAY_UID: u32 = 1;
+const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 17;
+const TRAY_MENU_OPEN: usize = 1001;
+const TRAY_MENU_EXIT: usize = 1002;
+static TRAY_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
+static TRAY_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 use windows::{
     Win32::{
         Devices::{
@@ -54,7 +62,7 @@ use windows::{
                 HidP_GetCaps, PHIDP_PREPARSED_DATA,
             },
         },
-        Foundation::CloseHandle,
+        Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Media::Audio::{
             DEVICE_STATE, DEVICE_STATE_ACTIVE, DEVICE_STATE_DISABLED, DEVICE_STATE_NOTPRESENT,
             DEVICE_STATE_UNPLUGGED, DEVICE_STATEMASK_ALL,
@@ -75,6 +83,21 @@ use windows::{
             EventLog::{
                 DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
                 EVENTLOG_WARNING_TYPE, RegisterEventSourceW, ReportEventW,
+            },
+            LibraryLoader::GetModuleHandleW,
+        },
+        UI::{
+            Shell::{
+                NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+                Shell_NotifyIconW,
+            },
+            WindowsAndMessaging::{
+                AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+                DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION, LoadIconW, MF_STRING,
+                MSG, PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
+                TPM_LEFTALIGN, TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
+                WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP,
+                WNDCLASSW,
             },
         },
     },
@@ -241,6 +264,10 @@ fn default_lighting_target() -> String {
     "all".to_string()
 }
 
+fn default_minimize_to_tray() -> bool {
+    true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct AppConfig {
     schema_version: u32,
@@ -277,6 +304,8 @@ struct UiConfig {
     selected_tab: String,
     window_width: f32,
     window_height: f32,
+    #[serde(default = "default_minimize_to_tray")]
+    minimize_to_tray: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -369,6 +398,184 @@ fn peak_from_bits(peak_bits: &AtomicU32) -> f32 {
     f32::from_bits(peak_bits.load(Ordering::Relaxed)).clamp(0.0, 1.0)
 }
 
+struct TrayHandle;
+
+impl TrayHandle {
+    fn start() -> Self {
+        thread::spawn(|| {
+            if let Err(error) = run_tray_message_loop() {
+                log_event("warn", "tray.start.error", &[("message", error)]);
+            }
+        });
+        Self
+    }
+}
+
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain([0]).collect()
+}
+
+fn copy_wide_into<const N: usize>(target: &mut [u16; N], value: &str) {
+    let wide = value.encode_utf16().take(N.saturating_sub(1));
+    for (index, code) in wide.enumerate() {
+        target[index] = code;
+    }
+}
+
+fn run_tray_message_loop() -> Result<(), String> {
+    unsafe extern "system" fn tray_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            TRAY_CALLBACK_MESSAGE => match lparam.0 as u32 {
+                WM_LBUTTONDBLCLK => {
+                    TRAY_SHOW_REQUESTED.store(true, Ordering::Relaxed);
+                    LRESULT(0)
+                }
+                WM_RBUTTONUP => {
+                    show_tray_menu(hwnd);
+                    LRESULT(0)
+                }
+                _ => LRESULT(0),
+            },
+            WM_COMMAND => {
+                match wparam.0 & 0xffff {
+                    TRAY_MENU_OPEN => TRAY_SHOW_REQUESTED.store(true, Ordering::Relaxed),
+                    TRAY_MENU_EXIT => TRAY_EXIT_REQUESTED.store(true, Ordering::Relaxed),
+                    _ => {}
+                }
+                LRESULT(0)
+            }
+            WM_CLOSE | WM_DESTROY => {
+                remove_tray_icon(hwnd);
+                unsafe {
+                    PostQuitMessage(0);
+                }
+                LRESULT(0)
+            }
+            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    let instance = unsafe { GetModuleHandleW(None).map_err(|error| error.to_string())? };
+    let class_name = wide_null("HyperXMicLiteTrayWindow");
+    let window_name = wide_null("HyperX Mic Lite Tray");
+    let window_class = WNDCLASSW {
+        lpfnWndProc: Some(tray_window_proc),
+        hInstance: instance.into(),
+        lpszClassName: PCWSTR(class_name.as_ptr()),
+        ..Default::default()
+    };
+    let atom = unsafe { RegisterClassW(&window_class) };
+    if atom == 0 {
+        return Err("RegisterClassW failed for tray window.".to_string());
+    }
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(window_name.as_ptr()),
+            Default::default(),
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    TRAY_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+    add_tray_icon(hwnd)?;
+    log_event("info", "tray.start", &[]);
+
+    let mut message = MSG::default();
+    while unsafe { GetMessageW(&mut message, None, 0, 0).into() } {
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    TRAY_HWND.store(0, Ordering::Relaxed);
+    log_event("info", "tray.stop", &[]);
+    Ok(())
+}
+
+fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
+    let icon = unsafe { LoadIconW(None, IDI_APPLICATION).map_err(|error| error.to_string())? };
+    let mut data = NOTIFYICONDATAW {
+        cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_UID,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uCallbackMessage: TRAY_CALLBACK_MESSAGE,
+        hIcon: icon,
+        ..Default::default()
+    };
+    copy_wide_into(&mut data.szTip, "HyperX Mic Lite");
+    let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() };
+    if ok {
+        Ok(())
+    } else {
+        Err("Shell_NotifyIconW(NIM_ADD) failed.".to_string())
+    }
+}
+
+fn remove_tray_icon(hwnd: HWND) {
+    let data = NOTIFYICONDATAW {
+        cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_UID,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+    }
+}
+
+fn show_tray_menu(hwnd: HWND) {
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return;
+        };
+        if menu.is_invalid() {
+            return;
+        }
+        let open = wide_null("Open");
+        let exit = wide_null("Exit");
+        let _ = AppendMenuW(menu, MF_STRING, TRAY_MENU_OPEN, PCWSTR(open.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, TRAY_MENU_EXIT, PCWSTR(exit.as_ptr()));
+        let mut point = POINT::default();
+        if GetCursorPos(&mut point).is_ok() {
+            let _ = SetForegroundWindow(hwnd);
+            let command = TrackPopupMenu(
+                menu,
+                TPM_LEFTALIGN | TPM_RETURNCMD,
+                point.x,
+                point.y,
+                Some(0),
+                hwnd,
+                None,
+            );
+            if command.0 != 0 {
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_COMMAND,
+                    WPARAM(command.0 as usize),
+                    LPARAM(0),
+                );
+            }
+        }
+        let _ = DestroyMenu(menu);
+    }
+}
+
 struct MicLiteApp {
     tab: Tab,
     status: Option<MicStatus>,
@@ -388,6 +595,10 @@ struct MicLiteApp {
     lighting_message: String,
     lighting_cancel: Option<Arc<AtomicBool>>,
     lighting_autostart_applied: bool,
+    minimize_to_tray: bool,
+    hidden_to_tray: bool,
+    force_exit: bool,
+    tray_handle: Option<TrayHandle>,
     start_minimized: bool,
     start_minimized_applied: bool,
 }
@@ -455,6 +666,7 @@ impl Default for AppConfig {
                 selected_tab: "audio".to_string(),
                 window_width: 1120.0,
                 window_height: 760.0,
+                minimize_to_tray: true,
             },
             service: ServiceConfig {
                 enabled: false,
@@ -3145,6 +3357,14 @@ impl MicLiteApp {
             lighting_message: String::new(),
             lighting_cancel: None,
             lighting_autostart_applied: false,
+            minimize_to_tray: config.ui.minimize_to_tray,
+            hidden_to_tray: false,
+            force_exit: false,
+            tray_handle: if config.ui.minimize_to_tray {
+                Some(TrayHandle::start())
+            } else {
+                None
+            },
             start_minimized,
             start_minimized_applied: false,
         };
@@ -3197,6 +3417,7 @@ impl MicLiteApp {
                 selected_tab: self.tab.as_config().to_string(),
                 window_width: 1120.0,
                 window_height: 760.0,
+                minimize_to_tray: self.minimize_to_tray,
             },
             service: load_or_create_config()
                 .map(|config| config.service)
@@ -3206,6 +3427,20 @@ impl MicLiteApp {
                 .unwrap_or_else(|_| AppConfig::default().device),
         };
         let _ = save_config(&config);
+    }
+
+    fn ensure_tray_started(&mut self) {
+        if self.tray_handle.is_none() {
+            self.tray_handle = Some(TrayHandle::start());
+        }
+    }
+
+    fn restore_from_tray(&mut self, ctx: &egui::Context) {
+        self.hidden_to_tray = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        log_event("info", "gui.restore_from_tray", &[]);
     }
 
     fn drain_hid_events(&mut self) {
@@ -3402,6 +3637,22 @@ impl MicLiteApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Refresh").clicked() {
                     self.refresh_status();
+                }
+                if ui
+                    .checkbox(&mut self.minimize_to_tray, "Minimize to tray")
+                    .changed()
+                {
+                    if self.minimize_to_tray {
+                        self.ensure_tray_started();
+                    } else if self.hidden_to_tray {
+                        self.restore_from_tray(ui.ctx());
+                    }
+                    self.save_config_snapshot();
+                    log_event(
+                        "info",
+                        "tray.option",
+                        &[("enabled", self.minimize_to_tray.to_string())],
+                    );
                 }
             });
         });
@@ -3674,6 +3925,34 @@ impl MicLiteApp {
 
 impl eframe::App for MicLiteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if TRAY_SHOW_REQUESTED.swap(false, Ordering::Relaxed) {
+            self.restore_from_tray(&ctx);
+        }
+        if TRAY_EXIT_REQUESTED.swap(false, Ordering::Relaxed) {
+            self.force_exit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            log_event("info", "tray.exit.request", &[]);
+        }
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.minimize_to_tray
+            && !self.force_exit
+        {
+            self.ensure_tray_started();
+            self.hidden_to_tray = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            log_event("info", "gui.close_to_tray", &[]);
+        }
+        if self.minimize_to_tray
+            && !self.hidden_to_tray
+            && ctx.input(|input| input.viewport().minimized == Some(true))
+        {
+            self.ensure_tray_started();
+            self.hidden_to_tray = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            log_event("info", "gui.minimize_to_tray", &[]);
+        }
         if !self.lighting_autostart_applied {
             self.lighting_autostart_applied = true;
             if self.lighting_device.is_some() {
@@ -3682,8 +3961,15 @@ impl eframe::App for MicLiteApp {
             }
         }
         if self.start_minimized && !self.start_minimized_applied {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            if self.minimize_to_tray {
+                self.ensure_tray_started();
+                self.hidden_to_tray = true;
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
             self.start_minimized_applied = true;
             log_event("info", "gui.start_minimized", &[]);
         }
