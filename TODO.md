@@ -30,7 +30,7 @@
 - [x] Publish retained state for mute, volumes, input level, polar pattern, lighting effect, target, brightness, speed, opacity, and live/muted policy.
 - [x] Subscribe to MQTT command topics for read/write control of mute, volumes, lighting settings, apply/stop, and persistent save.
 - [x] Publish Home Assistant MQTT discovery entities for switches, numbers, sensors, selects, and buttons.
-- Add GUI controls for MQTT setup and connection status.
+- [x] Add GUI controls for MQTT setup and connection status.
 - Add a standalone MQTT smoke-test command.
 
 ## UI Polish

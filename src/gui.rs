@@ -16,7 +16,7 @@ use crate::{
         set_audio_control_volume, set_mic_mute, set_mic_volume_percent, start_audio_peak_monitor,
     },
     config::{
-        AppConfig, AudioConfig, LightingConfig, UiConfig, export_config, import_config,
+        AppConfig, AudioConfig, LightingConfig, MqttConfig, UiConfig, export_config, import_config,
         load_or_create_config, save_config,
     },
     constants::CONFIG_SCHEMA_VERSION,
@@ -79,6 +79,10 @@ pub(crate) struct MicLiteApp {
     lighting_notice: Option<UiNotice>,
     mqtt_bridge: Option<MqttBridge>,
     mqtt_commands: Option<Receiver<MqttCommand>>,
+    mqtt_config: MqttConfig,
+    mqtt_settings_open: bool,
+    mqtt_settings_message: Option<UiNotice>,
+    mqtt_password_visible: bool,
     last_mqtt_publish: Instant,
     lighting_autostart_applied: bool,
     minimize_to_tray: bool,
@@ -166,6 +170,10 @@ impl MicLiteApp {
             lighting_notice: None,
             mqtt_bridge: mqtt_runtime.as_ref().map(|runtime| runtime.bridge.clone()),
             mqtt_commands: mqtt_runtime.map(|runtime| runtime.commands),
+            mqtt_config: config.mqtt.clone(),
+            mqtt_settings_open: false,
+            mqtt_settings_message: None,
+            mqtt_password_visible: false,
             last_mqtt_publish: Instant::now(),
             lighting_autostart_applied: false,
             minimize_to_tray: config.ui.minimize_to_tray,
@@ -201,7 +209,12 @@ impl MicLiteApp {
     }
 
     fn save_config_snapshot(&self) {
-        let config = AppConfig {
+        let config = self.current_config_snapshot();
+        let _ = save_config(&config);
+    }
+
+    fn current_config_snapshot(&self) -> AppConfig {
+        AppConfig {
             schema_version: CONFIG_SCHEMA_VERSION,
             audio: AudioConfig {
                 mic_volume: self.mic_volume,
@@ -249,11 +262,8 @@ impl MicLiteApp {
             device: load_or_create_config()
                 .map(|config| config.device)
                 .unwrap_or_else(|_| AppConfig::default().device),
-            mqtt: load_or_create_config()
-                .map(|config| config.mqtt)
-                .unwrap_or_else(|_| AppConfig::default().mqtt),
-        };
-        let _ = save_config(&config);
+            mqtt: self.mqtt_config.clone(),
+        }
     }
 
     fn ensure_tray_started(&mut self) {
@@ -749,6 +759,17 @@ impl MicLiteApp {
             self.save_config_snapshot();
         }
         ui.separator();
+        section_label(ui, "INTEGRATIONS");
+        let mqtt_label = if self.mqtt_config.enabled {
+            "MQTT settings… (enabled)"
+        } else {
+            "MQTT settings…"
+        };
+        if ui.button(mqtt_label).clicked() {
+            self.mqtt_settings_open = true;
+            ui.close();
+        }
+        ui.separator();
         section_label(ui, "CONFIG");
         if ui.button("Export config…").clicked() {
             self.export_config_action();
@@ -825,6 +846,170 @@ impl MicLiteApp {
                 &[("message", error.to_string())],
             );
         }
+    }
+
+    fn ui_mqtt_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.mqtt_settings_open {
+            return;
+        }
+
+        let mut open = self.mqtt_settings_open;
+        egui::Window::new("MQTT Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        section_label(ui, "STATUS");
+                        ui.add_space(8.0);
+                        let (text, color) = if !self.mqtt_config.enabled {
+                            ("Disabled", notice_color(NoticeSeverity::Info))
+                        } else if self.mqtt_bridge.is_some() {
+                            ("Runtime active", notice_color(NoticeSeverity::Good))
+                        } else {
+                            ("Enabled; restart needed or startup failed", notice_color(NoticeSeverity::Warning))
+                        };
+                        ui.colored_label(color, text);
+                    });
+                    ui.small("Connection changes are saved immediately, but the MQTT runtime starts on app launch. Restart the GUI after changing broker settings.");
+                    ui.add_space(8.0);
+
+                    ui.checkbox(&mut self.mqtt_config.enabled, "Enable MQTT integration");
+                    ui.checkbox(
+                        &mut self.mqtt_config.home_assistant_discovery,
+                        "Publish Home Assistant discovery",
+                    );
+                    ui.checkbox(&mut self.mqtt_config.retain_state, "Retain state topics");
+                    ui.checkbox(&mut self.mqtt_config.clean_session, "Clean session");
+
+                    ui.add_space(8.0);
+                    section_label(ui, "BROKER");
+                    labeled_text_edit(ui, "URL", &mut self.mqtt_config.url, false);
+                    labeled_text_edit(ui, "Client ID", &mut self.mqtt_config.client_id, false);
+                    ui.horizontal(|ui| {
+                        ui.set_width(500.0);
+                        ui.add_sized([115.0, 20.0], egui::Label::new("Username"));
+                        let username = self.mqtt_config.username.get_or_insert_with(String::new);
+                        ui.add_sized([340.0, 20.0], egui::TextEdit::singleline(username));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.set_width(500.0);
+                        ui.add_sized([115.0, 20.0], egui::Label::new("Password"));
+                        let password = self.mqtt_config.password.get_or_insert_with(String::new);
+                        ui.add_sized(
+                            [255.0, 20.0],
+                            egui::TextEdit::singleline(password)
+                                .password(!self.mqtt_password_visible),
+                        );
+                        ui.checkbox(&mut self.mqtt_password_visible, "show");
+                    });
+
+                    ui.add_space(8.0);
+                    section_label(ui, "TOPICS");
+                    labeled_text_edit(ui, "Base topic", &mut self.mqtt_config.base_topic, false);
+                    labeled_text_edit(
+                        ui,
+                        "Discovery prefix",
+                        &mut self.mqtt_config.discovery_prefix,
+                        false,
+                    );
+
+                    ui.add_space(8.0);
+                    section_label(ui, "SESSION");
+                    ui.horizontal(|ui| {
+                        ui.add_sized([115.0, 20.0], egui::Label::new("QoS"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.mqtt_config.qos)
+                                .range(0..=2)
+                                .speed(1),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_sized([115.0, 20.0], egui::Label::new("Keep alive"));
+                        ui.add(
+                            egui::DragValue::new(&mut self.mqtt_config.keep_alive_secs)
+                                .range(5..=3600)
+                                .speed(5),
+                        );
+                        ui.label("seconds");
+                    });
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            self.normalize_mqtt_config();
+                            match self.save_config_result() {
+                                Ok(()) => {
+                                    self.mqtt_settings_message = Some(UiNotice {
+                                        severity: NoticeSeverity::Good,
+                                        message: "MQTT settings saved. Restart the GUI to reconnect."
+                                            .to_string(),
+                                    });
+                                    log_event("info", "mqtt.settings.save", &[]);
+                                }
+                                Err(error) => {
+                                    self.mqtt_settings_message = Some(UiNotice {
+                                        severity: NoticeSeverity::Error,
+                                        message: error,
+                                    });
+                                }
+                            }
+                        }
+                        if ui.button("Reset defaults").clicked() {
+                            self.mqtt_config = MqttConfig::default();
+                            self.mqtt_settings_message = Some(UiNotice {
+                                severity: NoticeSeverity::Info,
+                                message: "Defaults loaded. Click Save to persist them.".to_string(),
+                            });
+                        }
+                        if ui.button("Close").clicked() {
+                            self.mqtt_settings_open = false;
+                        }
+                    });
+                    if let Some(message) = &self.mqtt_settings_message {
+                        ui.add_space(6.0);
+                        ui.colored_label(notice_color(message.severity), &message.message);
+                    }
+                });
+            });
+        self.mqtt_settings_open = open && self.mqtt_settings_open;
+    }
+
+    fn normalize_mqtt_config(&mut self) {
+        self.mqtt_config.url = self.mqtt_config.url.trim().to_string();
+        self.mqtt_config.client_id = self.mqtt_config.client_id.trim().to_string();
+        self.mqtt_config.base_topic = self
+            .mqtt_config
+            .base_topic
+            .trim()
+            .trim_matches('/')
+            .to_string();
+        self.mqtt_config.discovery_prefix = self
+            .mqtt_config
+            .discovery_prefix
+            .trim()
+            .trim_matches('/')
+            .to_string();
+        self.mqtt_config.username = self
+            .mqtt_config
+            .username
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self.mqtt_config.password = self
+            .mqtt_config
+            .password
+            .take()
+            .filter(|value| !value.is_empty());
+        self.mqtt_config.qos = self.mqtt_config.qos.min(2);
+        self.mqtt_config.keep_alive_secs = self.mqtt_config.keep_alive_secs.clamp(5, 3600);
+    }
+
+    fn save_config_result(&self) -> Result<(), String> {
+        let config = self.current_config_snapshot();
+        save_config(&config)
     }
 
     fn ui_layout_editor(&mut self, ui: &mut egui::Ui) {
@@ -1373,6 +1558,17 @@ fn notice_color(severity: NoticeSeverity) -> egui::Color32 {
     }
 }
 
+fn labeled_text_edit(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) {
+    ui.horizontal(|ui| {
+        ui.set_width(500.0);
+        ui.add_sized([115.0, 20.0], egui::Label::new(label));
+        ui.add_sized(
+            [340.0, 20.0],
+            egui::TextEdit::singleline(value).password(password),
+        );
+    });
+}
+
 impl eframe::App for MicLiteApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -1441,6 +1637,7 @@ impl eframe::App for MicLiteApp {
             });
             ui.add_space(10.0);
         });
+        self.ui_mqtt_settings_window(&ctx);
         self.remember_window_position(&ctx);
     }
 }
