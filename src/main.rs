@@ -2160,10 +2160,7 @@ fn run_lighting_vu_test(args: &[String]) {
         .clamp(1, 30);
 
     let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
-    let frame = apply_light_target(
-        build_vu_frame(level as f32 / 100.0, config.lighting.brightness),
-        LightTarget::from_config(&config.lighting.target),
-    );
+    let frame = build_vu_frame(level as f32 / 100.0, config.lighting.brightness);
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(seconds) {
         if let Err(error) = write_lighting_frame_once(frame, packet_log) {
@@ -2590,7 +2587,7 @@ fn stream_lighting_program_cancelable(
             };
             let target = peak.sqrt().clamp(0.0, 1.0);
             vu_level = smooth_vu_level(vu_level, target);
-            apply_light_target(build_vu_frame(vu_level, program.brightness), program.target)
+            build_vu_frame(vu_level, program.brightness)
         } else {
             let frame = frames[index % frames.len()];
             index += 1;
@@ -2660,7 +2657,7 @@ fn build_save_sentinel_packet() -> [u8; 64] {
 
 fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
     let colors = normalized_colors(program);
-    let mut frames = match program.effect {
+    match program.effect {
         Effect::Solid => vec![solid_frame(colors[0])],
         Effect::Cycle => cycle_frames(&colors, program.speed, false),
         Effect::Wave => cycle_frames(&colors, program.speed, true),
@@ -2668,11 +2665,7 @@ fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
         Effect::Blink => blink_frames(&colors, program.speed),
         Effect::Lightning => lightning_frames(&colors, program.speed),
         Effect::VuMeter => vec![solid_frame([0, 0, 0])],
-    };
-    for frame in &mut frames {
-        apply_light_target_in_place(frame, program.target);
     }
-    frames
 }
 
 fn normalized_colors(program: &LightingProgram) -> Vec<[u8; 3]> {
@@ -2699,27 +2692,6 @@ fn transition_steps(speed: u8, min: usize, max: usize) -> usize {
 
 fn solid_frame(color: [u8; 3]) -> LightingFrame {
     [color; LIGHTING_CELL_COUNT]
-}
-
-fn apply_light_target(mut frame: LightingFrame, target: LightTarget) -> LightingFrame {
-    apply_light_target_in_place(&mut frame, target);
-    frame
-}
-
-fn apply_light_target_in_place(frame: &mut LightingFrame, target: LightTarget) {
-    match target {
-        LightTarget::All => {}
-        LightTarget::Top => {
-            for color in frame.iter_mut().skip(LIGHTING_CELL_COUNT / 2) {
-                *color = [0, 0, 0];
-            }
-        }
-        LightTarget::Bottom => {
-            for color in frame.iter_mut().take(LIGHTING_CELL_COUNT / 2) {
-                *color = [0, 0, 0];
-            }
-        }
-    }
 }
 
 fn cycle_frames(colors: &[[u8; 3]], speed: u8, wave: bool) -> Vec<LightingFrame> {
@@ -3273,12 +3245,15 @@ impl MicLiteApp {
         };
         self.lighting_message = format!(
             "Applying {} to microphone. It will keep running while this app is open.",
-            program.effect.label()
+            program.effect.label(),
         );
         log_event(
             "info",
             "lighting.apply.start",
-            &[("effect", program.effect.as_config().to_string())],
+            &[
+                ("effect", program.effect.as_config().to_string()),
+                ("target", program.target.as_config().to_string()),
+            ],
         );
 
         if let Some(cancel) = &self.lighting_cancel {
@@ -3561,7 +3536,7 @@ impl MicLiteApp {
 
     fn ui_mic_stage(&self, ui: &mut egui::Ui) {
         let available = ui.available_width();
-        let height = (ui.available_height() * 0.46).clamp(250.0, 360.0);
+        let height = (ui.available_height() * 0.38).clamp(190.0, 290.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(available, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
 
@@ -3582,10 +3557,11 @@ impl MicLiteApp {
 
         if let Some(status) = &self.status {
             let text = format!(
-                "{} | {}% | {}",
+                "{} | {}% | {} | {}",
                 status.device.name,
                 status.volume,
-                if status.muted { "Muted" } else { "Live" }
+                if status.muted { "Muted" } else { "Live" },
+                self.polar_pattern.label(),
             );
             painter.text(
                 rect.left_top() + egui::vec2(16.0, 16.0),
@@ -3750,8 +3726,8 @@ fn run_gui(args: &[String]) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("HyperX Mic Lite")
-            .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([920.0, 620.0]),
+            .with_inner_size([980.0, 640.0])
+            .with_min_inner_size([820.0, 540.0]),
         ..Default::default()
     };
 
