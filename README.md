@@ -76,6 +76,7 @@ Use it:
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect cycle 10
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect vu_meter 10
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect vu_meter forever
+.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-vu-test 65 3
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect wave 5 --packet-log
 .\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe gui
 ```

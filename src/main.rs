@@ -630,6 +630,7 @@ fn run() -> WinResult<()> {
         "level-monitor" => run_level_monitor(&args[1..]),
         "lighting-solid" => run_lighting_solid(&args[1..]),
         "lighting-effect" => run_lighting_effect(&args[1..]),
+        "lighting-vu-test" => run_lighting_vu_test(&args[1..]),
         "config" => run_config_command(&args[1..]),
         "logs" => run_logs_command(&args[1..]),
         "diagnostics" => run_diagnostics_command(&args[1..]),
@@ -684,6 +685,7 @@ Usage:\n\
   hyperx-mic-lite level-monitor [seconds]\n\
   hyperx-mic-lite lighting-solid ff0066 [seconds]\n\
   hyperx-mic-lite lighting-effect <solid|wave|cycle|pulse|blink|lightning|vu_meter> [seconds|forever]\n\
+  hyperx-mic-lite lighting-vu-test <0-100> [seconds]\n\
   hyperx-mic-lite config <path|dump|export|import|validate|reset>\n\
   hyperx-mic-lite logs <path|tail>\n\
   hyperx-mic-lite diagnostics export [directory]\n\
@@ -2050,6 +2052,45 @@ fn run_lighting_effect(args: &[String]) {
     }
 }
 
+fn run_lighting_vu_test(args: &[String]) {
+    let (args, packet_log) = split_packet_log_flag(args);
+    if args.is_empty() || args.len() > 2 {
+        eprintln!("Usage: hyperx-mic-lite lighting-vu-test <0-100> [seconds] [--packet-log]");
+        process::exit(2);
+    }
+
+    let level = args[0].parse::<u8>().unwrap_or_else(|_| {
+        eprintln!("Level must be a whole number from 0 to 100.");
+        process::exit(2);
+    });
+    if level > 100 {
+        eprintln!("Level must be a whole number from 0 to 100.");
+        process::exit(2);
+    }
+    let seconds = args
+        .get(1)
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .unwrap_or_else(|_| {
+            eprintln!("Duration must be a whole number of seconds.");
+            process::exit(2);
+        })
+        .unwrap_or(2)
+        .clamp(1, 30);
+
+    let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+    let frame = build_vu_frame(level as f32 / 100.0, config.lighting.brightness);
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(seconds) {
+        if let Err(error) = write_lighting_frame_once(frame, packet_log) {
+            eprintln!("{error}");
+            process::exit(1);
+        }
+        thread::sleep(Duration::from_millis(80));
+    }
+    println!("Streamed VU test level {level}% for {seconds}s");
+}
+
 fn split_packet_log_flag(args: &[String]) -> (Vec<&str>, bool) {
     let mut packet_log = false;
     let mut filtered = Vec::new();
@@ -2358,7 +2399,7 @@ fn stream_lighting_program_cancelable(
     let started = std::time::Instant::now();
     let mut index = 0usize;
     let frame_delay = effect_frame_delay(program.speed);
-    let mut vu_level = 0.0f32;
+    let mut vu_level = 0.18f32;
 
     while match duration {
         StreamDuration::Timed(duration) => started.elapsed() < duration,
@@ -2524,13 +2565,13 @@ fn smooth_vu_level(current: f32, target: f32) -> f32 {
 
 fn build_vu_frame(level: f32, brightness: u8) -> [[u8; 3]; 2] {
     let level = level.clamp(0.0, 1.0);
-    let lower_strength = (level * 2.0).clamp(0.0, 1.0);
-    let upper_strength = ((level - 0.5) * 2.0).clamp(0.0, 1.0);
+    let lower_strength = (0.24 + level * 0.92).clamp(0.24, 1.0);
+    let upper_strength = ((level - 0.22) * 1.35).clamp(0.0, 1.0);
     let lower = vu_color(lower_strength, brightness);
-    let upper = if upper_strength <= 0.02 {
+    let upper = if upper_strength <= 0.08 {
         [0, 0, 0]
     } else {
-        vu_color(upper_strength.max(0.35), brightness)
+        vu_color(upper_strength.max(0.30), brightness)
     };
     [upper, lower]
 }
@@ -2543,7 +2584,7 @@ fn vu_color(strength: f32, brightness: u8) -> [u8; 3] {
     } else {
         lerp_color_float([255, 185, 0], [255, 255, 210], (strength - 0.72) / 0.28)
     };
-    let effective = ((strength * brightness as f32).round() as u8).clamp(4, 100);
+    let effective = ((strength * brightness as f32).round() as u8).clamp(18, 100);
     scale_color(base, effective)
 }
 
@@ -2642,6 +2683,11 @@ fn write_solid_lighting_once(
     brightness: u8,
     packet_log: bool,
 ) -> Result<(), String> {
+    let color = scale_color(color, brightness);
+    write_lighting_frame_once([color, color], packet_log)
+}
+
+fn write_lighting_frame_once(frame: [[u8; 3]; 2], packet_log: bool) -> Result<(), String> {
     let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
     let info = api
         .device_list()
@@ -2651,9 +2697,8 @@ fn write_solid_lighting_once(
     let device = api
         .open_path(info.path())
         .map_err(|error| error.to_string())?;
-    let color = scale_color(color, brightness);
     send_feature_packet(&device, &build_display_header_packet(), packet_log)?;
-    send_feature_packet(&device, &build_frame_packet([color, color]), packet_log)
+    send_feature_packet(&device, &build_frame_packet(frame), packet_log)
 }
 
 fn live_mute_lighting_color(is_live: bool) -> [u8; 3] {
