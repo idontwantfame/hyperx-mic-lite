@@ -1,0 +1,2956 @@
+#![cfg(windows)]
+
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::{
+    env,
+    ffi::{CStr, OsString},
+    fs::{self, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    process,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+use windows_service::{
+    define_windows_service,
+    service::{
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+    service_dispatcher,
+    service_manager::{ServiceManager, ServiceManagerAccess},
+};
+use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+
+const CONFIG_SCHEMA_VERSION: u32 = 1;
+const APP_NAME: &str = "HyperXMicLite";
+const SERVICE_NAME: &str = "HyperXMicLite";
+const SERVICE_DISPLAY_NAME: &str = "HyperX Mic Lite";
+const SERVICE_DESCRIPTION: &str =
+    "Restores HyperX Mic Lite microphone settings and hosts background device tasks.";
+const STARTUP_VALUE_NAME: &str = "HyperXMicLite";
+const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+use windows::{
+    Win32::{
+        Devices::{
+            FunctionDiscovery::PKEY_Device_FriendlyName,
+            HumanInterfaceDevice::{
+                HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetPreparsedData,
+                HidP_GetCaps, PHIDP_PREPARSED_DATA,
+            },
+        },
+        Foundation::CloseHandle,
+        Media::Audio::{
+            DEVICE_STATE, DEVICE_STATE_ACTIVE, DEVICE_STATE_DISABLED, DEVICE_STATE_NOTPRESENT,
+            DEVICE_STATE_UNPLUGGED, DEVICE_STATEMASK_ALL,
+            Endpoints::{IAudioEndpointVolume, IAudioMeterInformation},
+            IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eCommunications,
+        },
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        },
+        System::{
+            Com::StructuredStorage::PropVariantClear,
+            Com::{
+                CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoUninitialize, STGM_READ,
+            },
+            EventLog::{
+                DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
+                EVENTLOG_WARNING_TYPE, RegisterEventSourceW, ReportEventW,
+            },
+        },
+    },
+    core::Result as WinResult,
+    core::{PCWSTR, w},
+};
+
+struct DeviceInfo {
+    id: String,
+    name: String,
+    state: String,
+    is_default: bool,
+}
+
+struct MicStatus {
+    device: DeviceInfo,
+    volume: u8,
+    muted: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PolarPattern {
+    Stereo,
+    Omni,
+    Cardioid,
+    Bidirectional,
+    Unknown(u8),
+}
+
+impl PolarPattern {
+    fn from_report(value: u8) -> Self {
+        match value {
+            0 => Self::Stereo,
+            1 => Self::Omni,
+            2 => Self::Cardioid,
+            3 => Self::Bidirectional,
+            other => Self::Unknown(other),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Omni => "Omni",
+            Self::Cardioid => "Cardioid",
+            Self::Bidirectional => "Bidirectional",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+}
+
+enum HidEvent {
+    Mute(bool),
+    Pattern(PolarPattern),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Audio,
+    Lights,
+}
+
+impl Tab {
+    fn from_config(value: &str) -> Self {
+        match value {
+            "lights" => Self::Lights,
+            _ => Self::Audio,
+        }
+    }
+
+    fn as_config(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Lights => "lights",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Effect {
+    Wave,
+    Solid,
+    Cycle,
+    Pulse,
+    Blink,
+    Lightning,
+    VuMeter,
+}
+
+impl Effect {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Wave => "Wave",
+            Self::Solid => "Solid",
+            Self::Cycle => "Cycle",
+            Self::Pulse => "Pulse",
+            Self::Blink => "Blink",
+            Self::Lightning => "Lightning",
+            Self::VuMeter => "VU Meter",
+        }
+    }
+
+    fn from_config(value: &str) -> Self {
+        match value {
+            "solid" => Self::Solid,
+            "cycle" => Self::Cycle,
+            "pulse" => Self::Pulse,
+            "blink" => Self::Blink,
+            "lightning" => Self::Lightning,
+            "vu_meter" => Self::VuMeter,
+            _ => Self::Wave,
+        }
+    }
+
+    fn as_config(self) -> &'static str {
+        match self {
+            Self::Wave => "wave",
+            Self::Solid => "solid",
+            Self::Cycle => "cycle",
+            Self::Pulse => "pulse",
+            Self::Blink => "blink",
+            Self::Lightning => "lightning",
+            Self::VuMeter => "vu_meter",
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct AppConfig {
+    schema_version: u32,
+    audio: AudioConfig,
+    lighting: LightingConfig,
+    ui: UiConfig,
+    service: ServiceConfig,
+    device: DeviceConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct AudioConfig {
+    mic_volume: u8,
+    mic_monitoring: u8,
+    headphone_volume: u8,
+    mute_on_app_start: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct LightingConfig {
+    effect: String,
+    colors: Vec<String>,
+    selected_color: usize,
+    opacity: u8,
+    speed: u8,
+    brightness: u8,
+    live_when_muted: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct UiConfig {
+    selected_tab: String,
+    window_width: f32,
+    window_height: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ServiceConfig {
+    enabled: bool,
+    restore_on_startup: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct DeviceConfig {
+    preferred_capture_endpoint_id: Option<String>,
+    lighting_vendor_id: u16,
+    lighting_product_id: u16,
+}
+
+struct LightingState {
+    effect: Effect,
+    colors: Vec<egui::Color32>,
+    selected_color: usize,
+    opacity: u8,
+    speed: u8,
+    brightness: u8,
+    live_when_muted: bool,
+}
+
+#[derive(Clone)]
+struct LightingProgram {
+    effect: Effect,
+    colors: Vec<[u8; 3]>,
+    speed: u8,
+    brightness: u8,
+}
+
+#[derive(Clone, Copy)]
+enum StreamDuration {
+    Timed(Duration),
+    Forever,
+}
+
+struct LightingDevice {
+    vendor_id: u16,
+    product_id: u16,
+    interface_number: i32,
+    usage_page: u16,
+    usage: u16,
+    manufacturer: String,
+    product: String,
+}
+
+struct MicLiteApp {
+    tab: Tab,
+    status: Option<MicStatus>,
+    status_error: Option<String>,
+    mic_volume: u8,
+    mic_monitoring: u8,
+    headphone_volume: u8,
+    mute_on_app_start: bool,
+    input_peak: f32,
+    last_peak_update: Instant,
+    polar_pattern: PolarPattern,
+    hid_events: Receiver<HidEvent>,
+    lighting: LightingState,
+    lighting_device: Option<LightingDevice>,
+    lighting_message: String,
+    lighting_cancel: Option<Arc<AtomicBool>>,
+}
+
+struct ComApartment;
+
+impl ComApartment {
+    fn init() -> WinResult<Self> {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+        Ok(Self)
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            audio: AudioConfig {
+                mic_volume: 50,
+                mic_monitoring: 71,
+                headphone_volume: 5,
+                mute_on_app_start: false,
+            },
+            lighting: LightingConfig {
+                effect: "wave".to_string(),
+                colors: vec![
+                    "#ff2010".to_string(),
+                    "#ff009a".to_string(),
+                    "#5d18ff".to_string(),
+                    "#00a2ff".to_string(),
+                    "#00edbf".to_string(),
+                    "#38ee3d".to_string(),
+                    "#ffea20".to_string(),
+                ],
+                selected_color: 0,
+                opacity: 25,
+                speed: 75,
+                brightness: 100,
+                live_when_muted: true,
+            },
+            ui: UiConfig {
+                selected_tab: "audio".to_string(),
+                window_width: 1120.0,
+                window_height: 760.0,
+            },
+            service: ServiceConfig {
+                enabled: false,
+                restore_on_startup: false,
+            },
+            device: DeviceConfig {
+                preferred_capture_endpoint_id: None,
+                lighting_vendor_id: 0x0951,
+                lighting_product_id: 0x171f,
+            },
+        }
+    }
+}
+
+impl AppConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.schema_version == 0 || self.schema_version > CONFIG_SCHEMA_VERSION {
+            return Err(format!(
+                "Unsupported config schema version {}.",
+                self.schema_version
+            ));
+        }
+        validate_percent("audio.mic_volume", self.audio.mic_volume)?;
+        validate_percent("audio.mic_monitoring", self.audio.mic_monitoring)?;
+        validate_percent("audio.headphone_volume", self.audio.headphone_volume)?;
+        validate_percent("lighting.opacity", self.lighting.opacity)?;
+        validate_percent("lighting.speed", self.lighting.speed)?;
+        validate_percent("lighting.brightness", self.lighting.brightness)?;
+        if self.lighting.colors.is_empty() {
+            return Err("lighting.colors must contain at least one color.".to_string());
+        }
+        for color in &self.lighting.colors {
+            parse_rgb_hex(color)?;
+        }
+        if self.lighting.selected_color >= self.lighting.colors.len() {
+            return Err("lighting.selected_color is outside lighting.colors.".to_string());
+        }
+        if !matches!(self.ui.selected_tab.as_str(), "audio" | "lights") {
+            return Err("ui.selected_tab must be 'audio' or 'lights'.".to_string());
+        }
+        if self.ui.window_width < 640.0 || self.ui.window_height < 480.0 {
+            return Err("ui.window_width/window_height are too small.".to_string());
+        }
+        Ok(())
+    }
+
+    fn migrated(mut self) -> Self {
+        if self.schema_version < CONFIG_SCHEMA_VERSION {
+            self.schema_version = CONFIG_SCHEMA_VERSION;
+        }
+        self
+    }
+}
+
+fn validate_percent(name: &str, value: u8) -> Result<(), String> {
+    if value > 100 {
+        Err(format!("{name} must be 0..100."))
+    } else {
+        Ok(())
+    }
+}
+
+fn main() {
+    install_panic_hook();
+    log_event(
+        "info",
+        "app.start",
+        &[("args", env::args().skip(1).collect::<Vec<_>>().join(" "))],
+    );
+    if let Err(error) = run() {
+        log_event("error", "app.error", &[("message", error.to_string())]);
+        eprintln!("{error}");
+        process::exit(1);
+    }
+    log_event("info", "app.exit", &[]);
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        let message = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("panic");
+        let location = panic_info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let report_path = write_crash_report(message, &location).unwrap_or_else(|_| PathBuf::new());
+        log_event(
+            "error",
+            "app.panic",
+            &[
+                ("message", message.to_string()),
+                ("location", location),
+                ("report_path", report_path.display().to_string()),
+            ],
+        );
+    }));
+}
+
+fn log_event(level: &str, event: &str, fields: &[(&str, String)]) {
+    let path = log_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let mut object = serde_json::Map::new();
+    object.insert("ts".to_string(), serde_json::Value::String(log_timestamp()));
+    object.insert(
+        "level".to_string(),
+        serde_json::Value::String(level.to_string()),
+    );
+    object.insert(
+        "event".to_string(),
+        serde_json::Value::String(event.to_string()),
+    );
+    object.insert(
+        "pid".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(process::id())),
+    );
+    for (key, value) in fields {
+        object.insert((*key).to_string(), serde_json::Value::String(value.clone()));
+    }
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{}", serde_json::Value::Object(object));
+    }
+
+    if should_write_event_log(level, event) {
+        write_windows_event(level, event, fields);
+    }
+}
+
+fn should_write_event_log(level: &str, event: &str) -> bool {
+    matches!(level, "warn" | "error")
+        || matches!(event, "app.start" | "app.exit" | "gui.start" | "gui.exit")
+}
+
+fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
+    let event_type = match level {
+        "error" => EVENTLOG_ERROR_TYPE,
+        "warn" => EVENTLOG_WARNING_TYPE,
+        _ => EVENTLOG_INFORMATION_TYPE,
+    };
+
+    let mut lines = vec![
+        format!("event={event}"),
+        format!("level={level}"),
+        format!("pid={}", process::id()),
+        format!("log_path={}", log_file_path().display()),
+    ];
+    for (key, value) in fields {
+        lines.push(format!("{key}={value}"));
+    }
+    let message = lines.join("\r\n");
+    let wide_message = message.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let strings = [PCWSTR(wide_message.as_ptr())];
+
+    unsafe {
+        if let Ok(handle) = RegisterEventSourceW(None, w!("HyperXMicLite")) {
+            let _ = ReportEventW(
+                handle,
+                event_type,
+                0,
+                event_id_for(event),
+                None,
+                0,
+                Some(&strings),
+                None,
+            );
+            let _ = DeregisterEventSource(handle);
+        }
+    }
+}
+
+fn event_id_for(event: &str) -> u32 {
+    match event {
+        "app.start" => 1000,
+        "app.exit" => 1001,
+        "gui.start" => 1010,
+        "gui.exit" => 1011,
+        "app.error" => 2000,
+        "app.panic" => 2001,
+        "gui.error" => 2010,
+        "lighting.detect.none" => 3000,
+        "lighting.solid.error" => 3001,
+        _ => 1999,
+    }
+}
+
+fn write_crash_report(message: &str, location: &str) -> Result<PathBuf, String> {
+    let dir = app_data_dir().join("crashes");
+    fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let path = dir.join(format!("panic-{}.json", unix_timestamp_seconds()));
+    let report = serde_json::json!({
+        "ts": log_timestamp(),
+        "message": message,
+        "location": location,
+        "args": env::args().collect::<Vec<_>>(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "log_path": log_file_path(),
+        "config_path": config_path(),
+    });
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path)
+}
+
+fn log_timestamp() -> String {
+    let seconds = unix_timestamp_seconds();
+    format!("{seconds}")
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn log_file_path() -> PathBuf {
+    app_data_dir().join("logs").join("app.log")
+}
+
+fn run() -> WinResult<()> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.is_empty() {
+        usage();
+        process::exit(2);
+    }
+
+    let _com = ComApartment::init()?;
+
+    match args[0].as_str() {
+        "list" => print_devices_json(&list_capture_devices()?),
+        "status" => print_status_json(&mic_status()?),
+        "lighting-detect" => print_lighting_detection(),
+        "lighting-hid-dump" => print_lighting_hid_dump(),
+        "hid-monitor" => run_hid_monitor(&args[1..]),
+        "level-monitor" => run_level_monitor(&args[1..]),
+        "lighting-solid" => run_lighting_solid(&args[1..]),
+        "lighting-effect" => run_lighting_effect(&args[1..]),
+        "config" => run_config_command(&args[1..]),
+        "logs" => run_logs_command(&args[1..]),
+        "service" => run_service_command(&args[1..]),
+        "startup" => run_startup_command(&args[1..]),
+        "service-run" => {
+            if let Err(error) = run_windows_service() {
+                let message = windows_service_error(error);
+                log_event("error", "service.dispatcher.error", &[("message", message)]);
+                process::exit(1);
+            }
+        }
+        "gui" => run_gui(),
+        "mute" => {
+            set_mic_mute(true)?;
+            print_status_json(&mic_status()?);
+        }
+        "unmute" => {
+            set_mic_mute(false)?;
+            print_status_json(&mic_status()?);
+        }
+        "toggle" => {
+            let volume = endpoint_volume(&default_capture_device()?)?;
+            let muted = unsafe { volume.GetMute()?.as_bool() };
+            unsafe { volume.SetMute(!muted, std::ptr::null())? };
+            print_status_json(&mic_status()?);
+        }
+        "volume" => set_volume(&args[1..])?,
+        _ => {
+            usage();
+            process::exit(2);
+        }
+    }
+
+    Ok(())
+}
+
+fn usage() {
+    eprintln!(
+        "hyperx-mic-lite controls the default Windows microphone.\n\n\
+Usage:\n\
+  hyperx-mic-lite list\n\
+  hyperx-mic-lite status\n\
+  hyperx-mic-lite mute\n\
+  hyperx-mic-lite unmute\n\
+  hyperx-mic-lite toggle\n\
+  hyperx-mic-lite volume 75\n\
+  hyperx-mic-lite lighting-detect\n\
+  hyperx-mic-lite lighting-hid-dump\n\
+  hyperx-mic-lite hid-monitor [seconds]\n\
+  hyperx-mic-lite level-monitor [seconds]\n\
+  hyperx-mic-lite lighting-solid ff0066 [seconds]\n\
+  hyperx-mic-lite lighting-effect <solid|wave|cycle|pulse|blink|lightning|vu_meter> [seconds|forever]\n\
+  hyperx-mic-lite config <path|dump|export|import|validate|reset>\n\
+  hyperx-mic-lite logs <path|tail>\n\
+  hyperx-mic-lite service <install|uninstall|start|stop|status|run>\n\
+  hyperx-mic-lite startup <install|uninstall|status>\n\
+  hyperx-mic-lite gui"
+    );
+}
+
+fn run_startup_command(args: &[String]) {
+    if args.is_empty() {
+        startup_usage();
+        process::exit(2);
+    }
+
+    let result = match args[0].as_str() {
+        "install" => install_user_gui_startup(),
+        "uninstall" | "delete" => uninstall_user_gui_startup(),
+        "status" => print_user_gui_startup_status(),
+        _ => {
+            startup_usage();
+            process::exit(2);
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("{error}");
+        log_event("error", "startup.command.error", &[("message", error)]);
+        process::exit(1);
+    }
+}
+
+fn startup_usage() {
+    eprintln!(
+        "Usage:\n\
+  hyperx-mic-lite startup install\n\
+  hyperx-mic-lite startup uninstall\n\
+  hyperx-mic-lite startup status"
+    );
+}
+
+fn install_user_gui_startup() -> Result<(), String> {
+    let executable_path = env::current_exe().map_err(|error| error.to_string())?;
+    let command = format!("\"{}\" gui", executable_path.display());
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (run_key, _) = hkcu
+        .create_subkey(RUN_KEY_PATH)
+        .map_err(|error| error.to_string())?;
+    run_key
+        .set_value(STARTUP_VALUE_NAME, &command)
+        .map_err(|error| error.to_string())?;
+    println!("Installed per-user GUI startup: {command}");
+    log_event(
+        "info",
+        "startup.gui.install",
+        &[("command", command.to_string())],
+    );
+    Ok(())
+}
+
+fn uninstall_user_gui_startup() -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu
+        .open_subkey_with_flags(RUN_KEY_PATH, winreg::enums::KEY_SET_VALUE)
+        .map_err(|error| error.to_string())?;
+    match run_key.delete_value(STARTUP_VALUE_NAME) {
+        Ok(()) => {
+            println!("Removed per-user GUI startup.");
+            log_event("info", "startup.gui.uninstall", &[]);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("Per-user GUI startup was not installed.");
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn print_user_gui_startup_status() -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu
+        .open_subkey(RUN_KEY_PATH)
+        .map_err(|error| error.to_string())?;
+    let command = run_key.get_value::<String, _>(STARTUP_VALUE_NAME);
+    match command {
+        Ok(command) => {
+            println!(
+                "{{\"installed\":true,\"command\":{}}}",
+                json_string(&command)
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("{{\"installed\":false}}");
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn run_service_command(args: &[String]) {
+    if args.is_empty() {
+        service_usage();
+        process::exit(2);
+    }
+
+    let result = match args[0].as_str() {
+        "install" => install_windows_service(),
+        "uninstall" | "delete" => uninstall_windows_service(),
+        "start" => start_installed_service(),
+        "stop" => stop_installed_service(),
+        "status" => print_installed_service_status(),
+        "run" => run_service_worker_console(),
+        _ => {
+            service_usage();
+            process::exit(2);
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("{error}");
+        log_event("error", "service.command.error", &[("message", error)]);
+        process::exit(1);
+    }
+}
+
+fn service_usage() {
+    eprintln!(
+        "Usage:\n\
+  hyperx-mic-lite service install\n\
+  hyperx-mic-lite service uninstall\n\
+  hyperx-mic-lite service start\n\
+  hyperx-mic-lite service stop\n\
+  hyperx-mic-lite service status\n\
+  hyperx-mic-lite service run"
+    );
+}
+
+define_windows_service!(ffi_service_main, service_main);
+
+fn service_main(_arguments: Vec<OsString>) {
+    if let Err(error) = run_service_worker() {
+        log_event(
+            "error",
+            "service.worker.error",
+            &[("message", error.to_string())],
+        );
+    }
+}
+
+fn install_windows_service() -> Result<(), String> {
+    let executable_path = env::current_exe().map_err(|error| error.to_string())?;
+    let manager = ServiceManager::local_computer(
+        None::<&str>,
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+    )
+    .map_err(windows_service_error)?;
+
+    let service_info = ServiceInfo {
+        name: OsString::from(SERVICE_NAME),
+        display_name: OsString::from(SERVICE_DISPLAY_NAME),
+        service_type: ServiceType::OWN_PROCESS,
+        start_type: ServiceStartType::AutoStart,
+        error_control: ServiceErrorControl::Normal,
+        executable_path,
+        launch_arguments: vec![OsString::from("service-run")],
+        dependencies: vec![],
+        account_name: None,
+        account_password: None,
+    };
+
+    let service = manager
+        .create_service(
+            &service_info,
+            ServiceAccess::CHANGE_CONFIG | ServiceAccess::QUERY_STATUS,
+        )
+        .map_err(windows_service_error)?;
+    service
+        .set_description(SERVICE_DESCRIPTION)
+        .map_err(windows_service_error)?;
+    update_service_config(true)?;
+    println!("Installed {SERVICE_DISPLAY_NAME} as auto-start service.");
+    log_event("info", "service.install", &[]);
+    Ok(())
+}
+
+fn uninstall_windows_service() -> Result<(), String> {
+    let manager = service_manager(ServiceManagerAccess::CONNECT)?;
+    let service = manager
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+        )
+        .map_err(windows_service_error)?;
+
+    let status = service.query_status().map_err(windows_service_error)?;
+    if status.current_state != ServiceState::Stopped {
+        let _ = service.stop();
+    }
+    service.delete().map_err(windows_service_error)?;
+    update_service_config(false)?;
+    println!("Uninstalled {SERVICE_DISPLAY_NAME}. It may disappear after it fully stops.");
+    log_event("info", "service.uninstall", &[]);
+    Ok(())
+}
+
+fn start_installed_service() -> Result<(), String> {
+    let service = open_installed_service(ServiceAccess::START | ServiceAccess::QUERY_STATUS)?;
+    service.start::<&str>(&[]).map_err(windows_service_error)?;
+    println!("Start requested for {SERVICE_DISPLAY_NAME}.");
+    log_event("info", "service.start.request", &[]);
+    Ok(())
+}
+
+fn stop_installed_service() -> Result<(), String> {
+    let service = open_installed_service(ServiceAccess::STOP | ServiceAccess::QUERY_STATUS)?;
+    let status = service.stop().map_err(windows_service_error)?;
+    println!(
+        "Stop requested for {SERVICE_DISPLAY_NAME}; current state: {}.",
+        service_state_label(status.current_state)
+    );
+    log_event("info", "service.stop.request", &[]);
+    Ok(())
+}
+
+fn print_installed_service_status() -> Result<(), String> {
+    let service = open_installed_service(ServiceAccess::QUERY_STATUS)?;
+    let status = service.query_status().map_err(windows_service_error)?;
+    println!(
+        "{{\"name\":\"{}\",\"display_name\":\"{}\",\"state\":\"{}\",\"pid\":{}}}",
+        SERVICE_NAME,
+        SERVICE_DISPLAY_NAME,
+        service_state_label(status.current_state),
+        status.process_id.unwrap_or(0)
+    );
+    Ok(())
+}
+
+fn run_windows_service() -> Result<(), windows_service::Error> {
+    log_event("info", "service.dispatcher.start", &[]);
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+}
+
+fn run_service_worker_console() -> Result<(), String> {
+    println!("Running service worker in console mode. Press Ctrl+C to stop.");
+    restore_service_settings()?;
+    log_event("info", "service.console.running", &[]);
+    loop {
+        thread::sleep(Duration::from_secs(5));
+        log_event("info", "service.console.heartbeat", &[]);
+    }
+}
+
+fn run_service_worker() -> Result<(), windows_service::Error> {
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            ServiceControl::Stop | ServiceControl::Shutdown => {
+                let _ = shutdown_tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+
+    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+    set_service_status(
+        &status_handle,
+        ServiceState::StartPending,
+        1,
+        Duration::from_secs(10),
+    )?;
+
+    if let Err(error) = restore_service_settings() {
+        log_event(
+            "error",
+            "service.restore.error",
+            &[("message", error.to_string())],
+        );
+    }
+
+    set_service_status(
+        &status_handle,
+        ServiceState::Running,
+        0,
+        Duration::default(),
+    )?;
+    log_event("info", "service.running", &[]);
+
+    loop {
+        match shutdown_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                log_event("info", "service.heartbeat", &[]);
+            }
+        }
+    }
+
+    set_service_status(
+        &status_handle,
+        ServiceState::StopPending,
+        1,
+        Duration::from_secs(5),
+    )?;
+    log_event("info", "service.stopping", &[]);
+    set_service_status(
+        &status_handle,
+        ServiceState::Stopped,
+        0,
+        Duration::default(),
+    )?;
+    log_event("info", "service.stopped", &[]);
+    Ok(())
+}
+
+fn restore_service_settings() -> Result<(), String> {
+    let _com = ComApartment::init().map_err(|error| error.to_string())?;
+    let config = load_or_create_config()?;
+    if config.service.restore_on_startup {
+        set_mic_volume_percent(config.audio.mic_volume).map_err(|error| error.to_string())?;
+        set_mic_mute(config.audio.mute_on_app_start).map_err(|error| error.to_string())?;
+        log_event(
+            "info",
+            "service.restore.audio",
+            &[
+                ("mic_volume", config.audio.mic_volume.to_string()),
+                ("muted", config.audio.mute_on_app_start.to_string()),
+            ],
+        );
+    } else {
+        log_event("info", "service.restore.skipped", &[]);
+    }
+    Ok(())
+}
+
+fn set_service_status(
+    status_handle: &service_control_handler::ServiceStatusHandle,
+    current_state: ServiceState,
+    checkpoint: u32,
+    wait_hint: Duration,
+) -> Result<(), windows_service::Error> {
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state,
+        controls_accepted: if current_state == ServiceState::Running {
+            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN
+        } else {
+            ServiceControlAccept::empty()
+        },
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint,
+        wait_hint,
+        process_id: None,
+    })
+}
+
+fn service_manager(access: ServiceManagerAccess) -> Result<ServiceManager, String> {
+    ServiceManager::local_computer(None::<&str>, access).map_err(windows_service_error)
+}
+
+fn open_installed_service(
+    access: ServiceAccess,
+) -> Result<windows_service::service::Service, String> {
+    service_manager(ServiceManagerAccess::CONNECT)?
+        .open_service(SERVICE_NAME, access)
+        .map_err(windows_service_error)
+}
+
+fn update_service_config(enabled: bool) -> Result<(), String> {
+    let mut config = load_or_create_config()?;
+    config.service.enabled = enabled;
+    save_config(&config)
+}
+
+fn service_state_label(state: ServiceState) -> &'static str {
+    match state {
+        ServiceState::Stopped => "stopped",
+        ServiceState::StartPending => "start_pending",
+        ServiceState::StopPending => "stop_pending",
+        ServiceState::Running => "running",
+        ServiceState::ContinuePending => "continue_pending",
+        ServiceState::PausePending => "pause_pending",
+        ServiceState::Paused => "paused",
+    }
+}
+
+fn windows_service_error(error: windows_service::Error) -> String {
+    match error {
+        windows_service::Error::Winapi(io_error) => match io_error.raw_os_error() {
+            Some(5) => "Access denied. Run this command from an elevated terminal.".to_string(),
+            Some(1060) => format!("{SERVICE_DISPLAY_NAME} is not installed."),
+            _ => format!("{io_error}"),
+        },
+        other => format!("{other}"),
+    }
+}
+
+fn run_logs_command(args: &[String]) {
+    if args.is_empty() {
+        logs_usage();
+        process::exit(2);
+    }
+
+    let result = match args[0].as_str() {
+        "path" => {
+            println!("{}", log_file_path().display());
+            Ok(())
+        }
+        "tail" => {
+            let lines = args
+                .get(1)
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .unwrap_or_else(|_| {
+                    eprintln!("Line count must be a whole number.");
+                    process::exit(2);
+                })
+                .unwrap_or(80);
+            tail_log(lines)
+        }
+        _ => {
+            logs_usage();
+            process::exit(2);
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("{error}");
+        process::exit(1);
+    }
+}
+
+fn logs_usage() {
+    eprintln!(
+        "Usage:\n\
+  hyperx-mic-lite logs path\n\
+  hyperx-mic-lite logs tail [lines]"
+    );
+}
+
+fn tail_log(lines: usize) -> Result<(), String> {
+    let path = log_file_path();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let len = file
+        .metadata()
+        .map_err(|error| format!("{}: {error}", path.display()))?
+        .len();
+    let start = len.saturating_sub(64 * 1024);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut output = text.lines().rev().take(lines).collect::<Vec<_>>();
+    output.reverse();
+    for line in output {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn run_config_command(args: &[String]) {
+    if args.is_empty() {
+        config_usage();
+        process::exit(2);
+    }
+
+    let result = match args[0].as_str() {
+        "path" => {
+            println!("{}", config_path().display());
+            Ok(())
+        }
+        "dump" => match load_or_create_config() {
+            Ok(config) => print_config_json(&config),
+            Err(error) => Err(error),
+        },
+        "export" => {
+            if args.len() != 2 {
+                Err("Usage: hyperx-mic-lite config export <file>".to_string())
+            } else {
+                export_config(Path::new(&args[1]))
+            }
+        }
+        "import" => {
+            if args.len() != 2 {
+                Err("Usage: hyperx-mic-lite config import <file>".to_string())
+            } else {
+                import_config(Path::new(&args[1]))
+            }
+        }
+        "validate" => {
+            let path = if args.len() == 2 {
+                PathBuf::from(&args[1])
+            } else {
+                config_path()
+            };
+            validate_config_file(&path)
+        }
+        "reset" => reset_config(),
+        _ => {
+            config_usage();
+            process::exit(2);
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("{error}");
+        process::exit(1);
+    }
+}
+
+fn config_usage() {
+    eprintln!(
+        "Usage:\n\
+  hyperx-mic-lite config path\n\
+  hyperx-mic-lite config dump\n\
+  hyperx-mic-lite config export <file>\n\
+  hyperx-mic-lite config import <file>\n\
+  hyperx-mic-lite config validate [file]\n\
+  hyperx-mic-lite config reset"
+    );
+}
+
+fn app_data_dir() -> PathBuf {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join(APP_NAME)
+}
+
+fn config_dir() -> PathBuf {
+    app_data_dir()
+}
+
+fn config_path() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+fn load_or_create_config() -> Result<AppConfig, String> {
+    let path = config_path();
+    if !path.exists() {
+        let config = AppConfig::default();
+        save_config(&config)?;
+        return Ok(config);
+    }
+    load_config_from_path(&path)
+}
+
+fn load_config_from_path(path: &Path) -> Result<AppConfig, String> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let value = serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|error| format!("{}: invalid JSON: {error}", path.display()))?;
+    let migrated = migrate_config_value(value);
+    let config = serde_json::from_value::<AppConfig>(migrated)
+        .map_err(|error| format!("{}: invalid config: {error}", path.display()))?
+        .migrated();
+    config.validate()?;
+    log_event(
+        "info",
+        "config.load",
+        &[("path", path.display().to_string())],
+    );
+    Ok(config)
+}
+
+fn migrate_config_value(mut value: serde_json::Value) -> serde_json::Value {
+    let defaults = serde_json::to_value(AppConfig::default()).unwrap_or_default();
+    merge_missing_json(&mut value, &defaults);
+    value
+}
+
+fn merge_missing_json(value: &mut serde_json::Value, defaults: &serde_json::Value) {
+    if let (Some(value_object), Some(default_object)) =
+        (value.as_object_mut(), defaults.as_object())
+    {
+        for (key, default_value) in default_object {
+            match value_object.get_mut(key) {
+                Some(existing) => merge_missing_json(existing, default_value),
+                None => {
+                    value_object.insert(key.clone(), default_value.clone());
+                }
+            }
+        }
+    }
+}
+
+fn save_config(config: &AppConfig) -> Result<(), String> {
+    config.validate()?;
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(&path, format!("{text}\n"))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    log_event(
+        "info",
+        "config.save",
+        &[("path", path.display().to_string())],
+    );
+    Ok(())
+}
+
+fn print_config_json(config: &AppConfig) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    println!("{text}");
+    Ok(())
+}
+
+fn export_config(destination: &Path) -> Result<(), String> {
+    let config = load_or_create_config()?;
+    let text = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
+    fs::write(destination, format!("{text}\n"))
+        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    log_event(
+        "info",
+        "config.export",
+        &[("path", destination.display().to_string())],
+    );
+    println!("Exported config to {}", destination.display());
+    Ok(())
+}
+
+fn import_config(source: &Path) -> Result<(), String> {
+    let config = load_config_from_path(source)?;
+    backup_config_if_present()?;
+    save_config(&config)?;
+    log_event(
+        "info",
+        "config.import",
+        &[("source", source.display().to_string())],
+    );
+    println!("Imported config from {}", source.display());
+    Ok(())
+}
+
+fn validate_config_file(path: &Path) -> Result<(), String> {
+    let config = load_config_from_path(path)?;
+    config.validate()?;
+    println!("Config is valid: {}", path.display());
+    Ok(())
+}
+
+fn reset_config() -> Result<(), String> {
+    backup_config_if_present()?;
+    save_config(&AppConfig::default())?;
+    log_event("info", "config.reset", &[]);
+    println!("Reset config to defaults at {}", config_path().display());
+    Ok(())
+}
+
+fn backup_config_if_present() -> Result<(), String> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    let backup = config_dir().join(format!("config.backup.{}.json", unix_timestamp_seconds()));
+    fs::copy(&path, &backup)
+        .map(|_| ())
+        .map_err(|error| format!("{}: {error}", backup.display()))?;
+    log_event(
+        "info",
+        "config.backup",
+        &[("path", backup.display().to_string())],
+    );
+    Ok(())
+}
+
+fn unix_timestamp_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn print_lighting_detection() {
+    match detect_lighting_device() {
+        Some(device) => {
+            log_event(
+                "info",
+                "lighting.detect",
+                &[
+                    ("vendor_id", format!("{:04x}", device.vendor_id)),
+                    ("product_id", format!("{:04x}", device.product_id)),
+                    ("interface", device.interface_number.to_string()),
+                    ("usage_page", format!("{:04x}", device.usage_page)),
+                    ("usage", format!("{:04x}", device.usage)),
+                ],
+            );
+            println!("Lighting controller detected:");
+            println!(
+                "  VID:PID: {:04x}:{:04x}",
+                device.vendor_id, device.product_id
+            );
+            println!("  Interface: {}", device.interface_number);
+            println!("  Usage: {:04x}:{:04x}", device.usage_page, device.usage);
+            println!("  Name: {} {}", device.manufacturer, device.product);
+        }
+        None => {
+            log_event("warn", "lighting.detect.none", &[]);
+            println!("No supported HyperX QuadCast S lighting controller was detected.");
+        }
+    }
+}
+
+fn print_lighting_hid_dump() {
+    let api = match hidapi::HidApi::new() {
+        Ok(api) => api,
+        Err(error) => {
+            eprintln!("{error}");
+            process::exit(1);
+        }
+    };
+
+    for device in api
+        .device_list()
+        .filter(|device| is_supported_lighting_device(device))
+    {
+        println!(
+            "{:04x}:{:04x} interface {} usage {:04x}:{:04x}",
+            device.vendor_id(),
+            device.product_id(),
+            device.interface_number(),
+            device.usage_page(),
+            device.usage()
+        );
+        println!(
+            "  {} {}",
+            device.manufacturer_string().unwrap_or(""),
+            device.product_string().unwrap_or("")
+        );
+        match hid_caps_for_path(device.path()) {
+            Ok(caps) => {
+                println!(
+                    "  reports: input={} output={} feature={}",
+                    caps.InputReportByteLength,
+                    caps.OutputReportByteLength,
+                    caps.FeatureReportByteLength
+                );
+                println!(
+                    "  caps: input-values={} output-values={} feature-values={}",
+                    caps.NumberInputValueCaps,
+                    caps.NumberOutputValueCaps,
+                    caps.NumberFeatureValueCaps
+                );
+            }
+            Err(error) => println!("  caps: {error}"),
+        }
+    }
+}
+
+fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
+    let path = path.to_string_lossy();
+    let wide_path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            0,
+            FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+
+    let mut preparsed: PHIDP_PREPARSED_DATA = PHIDP_PREPARSED_DATA::default();
+    let result = unsafe {
+        if !HidD_GetPreparsedData(handle, &mut preparsed) {
+            let _ = CloseHandle(handle);
+            return Err("HidD_GetPreparsedData failed".to_string());
+        }
+
+        let mut caps = HIDP_CAPS::default();
+        let status = HidP_GetCaps(preparsed, &mut caps);
+        HidD_FreePreparsedData(preparsed);
+        let _ = CloseHandle(handle);
+
+        if status == HIDP_STATUS_SUCCESS {
+            Ok(caps)
+        } else {
+            Err(format!(
+                "HidP_GetCaps failed with NTSTATUS 0x{:08x}",
+                status.0
+            ))
+        }
+    };
+
+    result
+}
+
+fn detect_lighting_device() -> Option<LightingDevice> {
+    let api = hidapi::HidApi::new().ok()?;
+    let supported = [
+        (0x0951, 0x171f),
+        (0x03f0, 0x0f8b),
+        (0x03f0, 0x028c),
+        (0x03f0, 0x048c),
+        (0x03f0, 0x068c),
+        (0x03f0, 0x098c),
+    ];
+
+    api.device_list()
+        .filter(|device| {
+            supported.iter().any(|(vendor, product)| {
+                device.vendor_id() == *vendor && device.product_id() == *product
+            })
+        })
+        .max_by_key(|device| lighting_device_score(device))
+        .map(|device| LightingDevice {
+            vendor_id: device.vendor_id(),
+            product_id: device.product_id(),
+            interface_number: device.interface_number(),
+            usage_page: device.usage_page(),
+            usage: device.usage(),
+            manufacturer: device.manufacturer_string().unwrap_or("HyperX").to_string(),
+            product: device.product_string().unwrap_or("QuadCast S").to_string(),
+        })
+}
+
+fn is_supported_lighting_device(device: &hidapi::DeviceInfo) -> bool {
+    matches!(
+        (device.vendor_id(), device.product_id()),
+        (0x0951, 0x171f)
+            | (0x03f0, 0x0f8b)
+            | (0x03f0, 0x028c)
+            | (0x03f0, 0x048c)
+            | (0x03f0, 0x068c)
+            | (0x03f0, 0x098c)
+    )
+}
+
+fn lighting_device_score(device: &hidapi::DeviceInfo) -> (u8, u8, u8, i32) {
+    let rgb_collection = u8::from(device.usage_page() == 0xff90 && device.usage() == 0xff00);
+    let vendor_defined = u8::from(
+        device.usage_page() == 0xff90
+            || device.usage_page() == 0xff00
+            || device.usage_page() == 0xffff,
+    );
+    let controller_pid = u8::from(device.product_id() == 0x171f);
+    let interface_preference = if device.interface_number() == 0 { 1 } else { 0 };
+    (
+        rgb_collection,
+        vendor_defined,
+        controller_pid,
+        interface_preference,
+    )
+}
+
+fn run_lighting_solid(args: &[String]) {
+    if args.is_empty() || args.len() > 2 {
+        eprintln!("Usage: hyperx-mic-lite lighting-solid ff0066 [seconds]");
+        process::exit(2);
+    }
+
+    let color = parse_rgb_hex(&args[0]).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(2);
+    });
+
+    let seconds = args
+        .get(1)
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .unwrap_or_else(|_| {
+            eprintln!("Duration must be a whole number of seconds.");
+            process::exit(2);
+        })
+        .unwrap_or(3)
+        .clamp(1, 60);
+
+    let program = LightingProgram {
+        effect: Effect::Solid,
+        colors: vec![color],
+        speed: 75,
+        brightness: 100,
+    };
+
+    match stream_lighting_program(
+        &program,
+        StreamDuration::Timed(Duration::from_secs(seconds)),
+    ) {
+        Ok(()) => {
+            log_event(
+                "info",
+                "lighting.solid",
+                &[
+                    (
+                        "color",
+                        format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]),
+                    ),
+                    ("seconds", seconds.to_string()),
+                ],
+            );
+            println!(
+                "Streamed solid color #{:02x}{:02x}{:02x} for {seconds}s",
+                color[0], color[1], color[2],
+            )
+        }
+        Err(error) => {
+            log_event(
+                "error",
+                "lighting.solid.error",
+                &[("message", error.clone())],
+            );
+            eprintln!("{error}");
+            process::exit(1);
+        }
+    }
+}
+
+fn run_lighting_effect(args: &[String]) {
+    if args.is_empty() || args.len() > 2 {
+        eprintln!(
+            "Usage: hyperx-mic-lite lighting-effect <solid|wave|cycle|pulse|blink|lightning|vu_meter> [seconds]"
+        );
+        process::exit(2);
+    }
+
+    let effect = Effect::from_config(&args[0]);
+    let stream_duration = args
+        .get(1)
+        .map(|value| parse_stream_duration(value))
+        .transpose()
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            process::exit(2);
+        })
+        .unwrap_or(StreamDuration::Forever);
+    let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+    let colors = config
+        .lighting
+        .colors
+        .iter()
+        .filter_map(|color| parse_rgb_hex(color).ok())
+        .collect::<Vec<_>>();
+    let program = LightingProgram {
+        effect,
+        colors: if colors.is_empty() {
+            vec![[0, 255, 0]]
+        } else {
+            colors
+        },
+        speed: config.lighting.speed,
+        brightness: config.lighting.brightness,
+    };
+
+    match stream_lighting_program(&program, stream_duration) {
+        Ok(()) => println!("Streamed {}", effect.label()),
+        Err(error) => {
+            log_event(
+                "error",
+                "lighting.effect.error",
+                &[("message", error.clone())],
+            );
+            eprintln!("{error}");
+            process::exit(1);
+        }
+    }
+}
+
+fn parse_stream_duration(value: &str) -> Result<StreamDuration, String> {
+    if value.eq_ignore_ascii_case("forever") {
+        return Ok(StreamDuration::Forever);
+    }
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "Duration must be seconds or 'forever'.".to_string())?
+        .clamp(1, 120);
+    Ok(StreamDuration::Timed(Duration::from_secs(seconds)))
+}
+
+fn run_hid_monitor(args: &[String]) {
+    if args.len() > 1 {
+        eprintln!("Usage: hyperx-mic-lite hid-monitor [seconds]");
+        process::exit(2);
+    }
+
+    let seconds = args
+        .first()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .unwrap_or_else(|_| {
+            eprintln!("Duration must be a whole number of seconds.");
+            process::exit(2);
+        })
+        .unwrap_or(15)
+        .clamp(1, 120);
+
+    if let Err(error) = monitor_hid_reports(Duration::from_secs(seconds)) {
+        eprintln!("{error}");
+        process::exit(1);
+    }
+}
+
+fn run_level_monitor(args: &[String]) {
+    if args.len() > 1 {
+        eprintln!("Usage: hyperx-mic-lite level-monitor [seconds]");
+        process::exit(2);
+    }
+
+    let seconds = args
+        .first()
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .unwrap_or_else(|_| {
+            eprintln!("Duration must be a whole number of seconds.");
+            process::exit(2);
+        })
+        .unwrap_or(15)
+        .clamp(1, 120);
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(seconds) {
+        match input_peak_value() {
+            Ok(peak) => println!(
+                "{:>6}ms input-peak={:.3}",
+                started.elapsed().as_millis(),
+                peak
+            ),
+            Err(error) => println!(
+                "{:>6}ms input-peak-error={error}",
+                started.elapsed().as_millis()
+            ),
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn monitor_hid_reports(duration: Duration) -> Result<(), String> {
+    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+    let mut devices = Vec::new();
+
+    for info in api
+        .device_list()
+        .filter(|device| is_supported_lighting_device(device))
+    {
+        if let Ok(device) = api.open_path(info.path()) {
+            device
+                .set_blocking_mode(false)
+                .map_err(|error| error.to_string())?;
+            devices.push((
+                format!(
+                    "{:04x}:{:04x} if{} {:04x}:{:04x}",
+                    info.vendor_id(),
+                    info.product_id(),
+                    info.interface_number(),
+                    info.usage_page(),
+                    info.usage()
+                ),
+                device,
+                hid_caps_for_path(info.path()).ok(),
+            ));
+        }
+    }
+
+    if devices.is_empty() {
+        return Err("No supported QuadCast S HID interfaces could be opened.".to_string());
+    }
+
+    println!(
+        "Monitoring {} HID interface(s) for {}s.",
+        devices.len(),
+        duration.as_secs()
+    );
+    println!(
+        "Press one physical control at a time: mute, pattern positions, then turn the gain dial."
+    );
+
+    let started = std::time::Instant::now();
+    let mut last_volume = mic_status().ok().map(|status| status.volume);
+    if let Some(volume) = last_volume {
+        println!("{:>6}ms core-audio mic-volume={volume}", 0);
+    }
+
+    let mut buffers = devices
+        .iter()
+        .map(|(_, _, caps)| {
+            let len = caps
+                .as_ref()
+                .map(|caps| caps.InputReportByteLength as usize)
+                .unwrap_or(65)
+                .max(65);
+            vec![0u8; len]
+        })
+        .collect::<Vec<_>>();
+
+    while started.elapsed() < duration {
+        for (index, (label, device, _)) in devices.iter().enumerate() {
+            match device.read_timeout(&mut buffers[index], 10) {
+                Ok(0) => {}
+                Ok(count) => {
+                    let elapsed = started.elapsed().as_millis();
+                    let decoded = decode_hid_report(&buffers[index][..count])
+                        .map(|value| format!(" {value}"))
+                        .unwrap_or_default();
+                    println!(
+                        "{elapsed:>6}ms {label} {}{}",
+                        hex_bytes(&buffers[index][..count]),
+                        decoded
+                    );
+                }
+                Err(error) => {
+                    let elapsed = started.elapsed().as_millis();
+                    println!("{elapsed:>6}ms {label} read-error: {error}");
+                }
+            }
+        }
+
+        if let Ok(status) = mic_status() {
+            if last_volume != Some(status.volume) {
+                let elapsed = started.elapsed().as_millis();
+                println!("{elapsed:>6}ms core-audio mic-volume={}", status.volume);
+                last_volume = Some(status.volume);
+            }
+        }
+
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    Ok(())
+}
+
+fn spawn_hid_event_listener() -> Receiver<HidEvent> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let api = match hidapi::HidApi::new() {
+            Ok(api) => api,
+            Err(_) => return,
+        };
+
+        let mut devices = Vec::new();
+        for info in api
+            .device_list()
+            .filter(|device| is_supported_lighting_device(device))
+        {
+            if info.usage_page() != 0xffff || info.usage() != 0x0001 {
+                continue;
+            }
+            if let Ok(device) = api.open_path(info.path()) {
+                let _ = device.set_blocking_mode(false);
+                devices.push(device);
+            }
+        }
+
+        let mut buffer = [0u8; 65];
+        loop {
+            for device in &devices {
+                if let Ok(count) = device.read_timeout(&mut buffer, 50) {
+                    if count > 0 {
+                        match decode_hid_event(&buffer[..count]) {
+                            Some(HidEvent::Mute(is_live)) => {
+                                let _ = sender.send(HidEvent::Mute(is_live));
+                            }
+                            Some(HidEvent::Pattern(pattern)) => {
+                                let _ = sender.send(HidEvent::Pattern(pattern));
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+    receiver
+}
+
+fn decode_hid_event(report: &[u8]) -> Option<HidEvent> {
+    match report {
+        [0x05, 0x10, value, ..] => Some(HidEvent::Mute(*value == 1)),
+        [0x05, 0x11, value, ..] => Some(HidEvent::Pattern(PolarPattern::from_report(*value))),
+        _ => None,
+    }
+}
+
+fn decode_hid_report(report: &[u8]) -> Option<String> {
+    match decode_hid_event(report)? {
+        HidEvent::Mute(is_live) => Some(format!(
+            "mute={}",
+            if is_live { "live/unmuted" } else { "muted" }
+        )),
+        HidEvent::Pattern(pattern) => Some(format!("pattern={}", pattern.label())),
+    }
+}
+
+fn pattern_description(pattern: PolarPattern) -> &'static str {
+    match pattern {
+        PolarPattern::Stereo => "Captures left and right channels for wider sources.",
+        PolarPattern::Omni => "Captures sound evenly from around the microphone.",
+        PolarPattern::Cardioid => "Best for podcasts, streaming, voiceovers and instruments.",
+        PolarPattern::Bidirectional => "Captures from the front and back for interviews.",
+        PolarPattern::Unknown(_) => "Unrecognized hardware pattern report.",
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_rgb_hex(value: &str) -> Result<[u8; 3], String> {
+    let trimmed = value.trim().trim_start_matches('#');
+    if trimmed.len() != 6 {
+        return Err("Color must be six hex digits, for example ff0066.".to_string());
+    }
+
+    let parsed = u32::from_str_radix(trimmed, 16)
+        .map_err(|_| "Color must contain only hex digits.".to_string())?;
+    Ok([
+        ((parsed >> 16) & 0xff) as u8,
+        ((parsed >> 8) & 0xff) as u8,
+        (parsed & 0xff) as u8,
+    ])
+}
+
+fn color_to_hex(color: egui::Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
+fn stream_lighting_program(
+    program: &LightingProgram,
+    duration: StreamDuration,
+) -> Result<(), String> {
+    stream_lighting_program_cancelable(program, duration, None)
+}
+
+fn stream_lighting_program_cancelable(
+    program: &LightingProgram,
+    duration: StreamDuration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<(), String> {
+    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+    let info = api
+        .device_list()
+        .filter(|device| is_supported_lighting_device(device))
+        .max_by_key(|device| lighting_device_score(device))
+        .ok_or_else(|| "No supported QuadCast S lighting HID interface detected.".to_string())?;
+
+    let device = api
+        .open_path(info.path())
+        .map_err(|error| error.to_string())?;
+
+    let header = build_display_header_packet();
+    let frames = build_effect_frames(program);
+    if frames.is_empty() {
+        return Err("No lighting frames were generated.".to_string());
+    }
+    let started = std::time::Instant::now();
+    let mut index = 0usize;
+    let frame_delay = effect_frame_delay(program.speed);
+
+    while match duration {
+        StreamDuration::Timed(duration) => started.elapsed() < duration,
+        StreamDuration::Forever => true,
+    } {
+        if cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            break;
+        }
+        let frame = if program.effect == Effect::VuMeter {
+            build_vu_frame(input_peak_value().unwrap_or(0.0), program.brightness)
+        } else {
+            let frame = frames[index % frames.len()];
+            index += 1;
+            frame
+        };
+        send_feature_packet(&device, &header)?;
+        send_feature_packet(&device, &build_frame_packet(frame))?;
+        thread::sleep(frame_delay);
+    }
+
+    Ok(())
+}
+
+fn build_display_header_packet() -> [u8; 64] {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x04;
+    packet[1] = 0xf2;
+    packet[8] = 0x01;
+    packet
+}
+
+fn build_frame_packet(frame: [[u8; 3]; 2]) -> [u8; 64] {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x81;
+    packet[1] = frame[0][0];
+    packet[2] = frame[0][1];
+    packet[3] = frame[0][2];
+    packet[4] = 0x81;
+    packet[5] = frame[1][0];
+    packet[6] = frame[1][1];
+    packet[7] = frame[1][2];
+    packet
+}
+
+fn build_effect_frames(program: &LightingProgram) -> Vec<[[u8; 3]; 2]> {
+    let colors = normalized_colors(program);
+    match program.effect {
+        Effect::Solid => vec![[colors[0], colors[0]]],
+        Effect::Cycle => cycle_frames(&colors, program.speed, false),
+        Effect::Wave => cycle_frames(&colors, program.speed, true),
+        Effect::Pulse => pulse_frames(&colors, program.speed),
+        Effect::Blink => blink_frames(&colors, program.speed),
+        Effect::Lightning => lightning_frames(&colors, program.speed),
+        Effect::VuMeter => vec![[[0, 0, 0], [0, 0, 0]]],
+    }
+}
+
+fn normalized_colors(program: &LightingProgram) -> Vec<[u8; 3]> {
+    let colors = if program.colors.is_empty() {
+        vec![[0, 255, 0]]
+    } else {
+        program.colors.clone()
+    };
+    colors
+        .into_iter()
+        .map(|color| scale_color(color, program.brightness))
+        .collect()
+}
+
+fn effect_frame_delay(speed: u8) -> Duration {
+    let millis = 140u64.saturating_sub(speed as u64);
+    Duration::from_millis(millis.clamp(24, 140))
+}
+
+fn transition_steps(speed: u8, min: usize, max: usize) -> usize {
+    let span = max.saturating_sub(min);
+    max.saturating_sub((span * speed as usize) / 100).max(min)
+}
+
+fn cycle_frames(colors: &[[u8; 3]], speed: u8, wave: bool) -> Vec<[[u8; 3]; 2]> {
+    let steps = transition_steps(speed, 8, 48);
+    let mut sequence = Vec::new();
+    for index in 0..colors.len() {
+        let start = colors[index];
+        let end = colors[(index + 1) % colors.len()];
+        for step in 0..steps {
+            sequence.push(lerp_color(start, end, step, steps));
+        }
+    }
+
+    if sequence.is_empty() {
+        return vec![[[0, 0, 0], [0, 0, 0]]];
+    }
+
+    let phase = if wave { sequence.len() / 3 } else { 0 };
+    sequence
+        .iter()
+        .enumerate()
+        .map(|(index, upper)| {
+            let lower = sequence[(index + phase) % sequence.len()];
+            [*upper, lower]
+        })
+        .collect()
+}
+
+fn pulse_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
+    let steps = transition_steps(speed, 6, 36);
+    let mut frames = Vec::new();
+    for &color in colors {
+        for step in 0..steps {
+            let value = lerp_color([0, 0, 0], color, step, steps);
+            frames.push([value, value]);
+        }
+        for step in 0..steps {
+            let value = lerp_color(color, [0, 0, 0], step, steps);
+            frames.push([value, value]);
+        }
+    }
+    frames
+}
+
+fn blink_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
+    let lit = transition_steps(speed, 2, 16);
+    let dark = transition_steps(speed, 2, 24);
+    let mut frames = Vec::new();
+    for &color in colors {
+        for _ in 0..lit {
+            frames.push([color, color]);
+        }
+        for _ in 0..dark {
+            frames.push([[0, 0, 0], [0, 0, 0]]);
+        }
+    }
+    frames
+}
+
+fn lightning_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
+    let flash = transition_steps(speed, 1, 6);
+    let fade = transition_steps(speed, 8, 42);
+    let mut frames = Vec::new();
+    for &color in colors {
+        for _ in 0..flash {
+            frames.push([color, [0, 0, 0]]);
+        }
+        for step in 0..fade {
+            let value = lerp_color(color, [0, 0, 0], step, fade);
+            frames.push([value, value]);
+        }
+        frames.push([[0, 0, 0], [0, 0, 0]]);
+    }
+    frames
+}
+
+fn build_vu_frame(peak: f32, brightness: u8) -> [[u8; 3]; 2] {
+    let level = peak.sqrt().clamp(0.0, 1.0);
+    let lower_strength = (level * 2.0).clamp(0.0, 1.0);
+    let upper_strength = ((level - 0.5) * 2.0).clamp(0.0, 1.0);
+    let lower = vu_color(lower_strength, brightness);
+    let upper = if upper_strength <= 0.02 {
+        [0, 0, 0]
+    } else {
+        vu_color(upper_strength.max(0.35), brightness)
+    };
+    [upper, lower]
+}
+
+fn vu_color(strength: f32, brightness: u8) -> [u8; 3] {
+    let base = if strength < 0.55 {
+        [0, 255, 64]
+    } else if strength < 0.82 {
+        [255, 190, 0]
+    } else {
+        [255, 24, 12]
+    };
+    let effective = ((strength * brightness as f32).round() as u8).clamp(3, 100);
+    scale_color(base, effective)
+}
+
+fn lerp_color(start: [u8; 3], end: [u8; 3], step: usize, steps: usize) -> [u8; 3] {
+    let denominator = steps.saturating_sub(1).max(1) as f32;
+    let t = step as f32 / denominator;
+    [
+        (start[0] as f32 + (end[0] as f32 - start[0] as f32) * t).round() as u8,
+        (start[1] as f32 + (end[1] as f32 - start[1] as f32) * t).round() as u8,
+        (start[2] as f32 + (end[2] as f32 - start[2] as f32) * t).round() as u8,
+    ]
+}
+
+fn scale_color(color: [u8; 3], percent: u8) -> [u8; 3] {
+    [
+        ((color[0] as u16 * percent as u16) / 100) as u8,
+        ((color[1] as u16 * percent as u16) / 100) as u8,
+        ((color[2] as u16 * percent as u16) / 100) as u8,
+    ]
+}
+
+fn send_feature_packet(device: &hidapi::HidDevice, packet: &[u8; 64]) -> Result<(), String> {
+    let mut with_report_id = [0u8; 65];
+    with_report_id[1..].copy_from_slice(packet);
+
+    let mut errors = Vec::new();
+
+    if let Err(error) = device.send_feature_report(&with_report_id) {
+        errors.push(format!("feature+id: {error}"));
+    } else {
+        return Ok(());
+    }
+
+    if let Err(error) = device.send_feature_report(packet) {
+        errors.push(format!("feature: {error}"));
+    } else {
+        return Ok(());
+    }
+
+    if let Err(error) = device.write(&with_report_id) {
+        errors.push(format!("output+id: {error}"));
+    } else {
+        return Ok(());
+    }
+
+    if let Err(error) = device.write(packet) {
+        errors.push(format!("output: {error}"));
+    } else {
+        return Ok(());
+    }
+
+    Err(errors.join("; "))
+}
+
+impl MicLiteApp {
+    fn new() -> Self {
+        let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+        let colors = config
+            .lighting
+            .colors
+            .iter()
+            .filter_map(|color| parse_rgb_hex(color).ok())
+            .map(|rgb| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+            .collect::<Vec<_>>();
+        let mut app = Self {
+            tab: Tab::from_config(&config.ui.selected_tab),
+            status: None,
+            status_error: None,
+            mic_volume: config.audio.mic_volume,
+            mic_monitoring: config.audio.mic_monitoring,
+            headphone_volume: config.audio.headphone_volume,
+            mute_on_app_start: config.audio.mute_on_app_start,
+            input_peak: 0.0,
+            last_peak_update: Instant::now(),
+            polar_pattern: PolarPattern::Unknown(255),
+            hid_events: spawn_hid_event_listener(),
+            lighting: LightingState {
+                effect: Effect::from_config(&config.lighting.effect),
+                colors: if colors.is_empty() {
+                    AppConfig::default()
+                        .lighting
+                        .colors
+                        .iter()
+                        .filter_map(|color| parse_rgb_hex(color).ok())
+                        .map(|rgb| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+                        .collect()
+                } else {
+                    colors
+                },
+                selected_color: config.lighting.selected_color,
+                opacity: config.lighting.opacity,
+                speed: config.lighting.speed,
+                brightness: config.lighting.brightness,
+                live_when_muted: config.lighting.live_when_muted,
+            },
+            lighting_device: detect_lighting_device(),
+            lighting_message: String::new(),
+            lighting_cancel: None,
+        };
+        app.refresh_status();
+        if app.mute_on_app_start {
+            app.set_mute(true);
+        }
+        if app.lighting.selected_color >= app.lighting.colors.len() {
+            app.lighting.selected_color = 0;
+        }
+        app.lighting_message = match &app.lighting_device {
+            Some(device) => format!(
+                "Detected {:04x}:{:04x} interface {} usage {:04x}:{:04x}. Packet writer is next.",
+                device.vendor_id,
+                device.product_id,
+                device.interface_number,
+                device.usage_page,
+                device.usage
+            ),
+            None => "No supported QuadCast S lighting HID interface detected.".to_string(),
+        };
+        app
+    }
+
+    fn save_config_snapshot(&self) {
+        let config = AppConfig {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            audio: AudioConfig {
+                mic_volume: self.mic_volume,
+                mic_monitoring: self.mic_monitoring,
+                headphone_volume: self.headphone_volume,
+                mute_on_app_start: self.mute_on_app_start,
+            },
+            lighting: LightingConfig {
+                effect: self.lighting.effect.as_config().to_string(),
+                colors: self
+                    .lighting
+                    .colors
+                    .iter()
+                    .map(|color| color_to_hex(*color))
+                    .collect(),
+                selected_color: self.lighting.selected_color,
+                opacity: self.lighting.opacity,
+                speed: self.lighting.speed,
+                brightness: self.lighting.brightness,
+                live_when_muted: self.lighting.live_when_muted,
+            },
+            ui: UiConfig {
+                selected_tab: self.tab.as_config().to_string(),
+                window_width: 1120.0,
+                window_height: 760.0,
+            },
+            service: load_or_create_config()
+                .map(|config| config.service)
+                .unwrap_or_else(|_| AppConfig::default().service),
+            device: load_or_create_config()
+                .map(|config| config.device)
+                .unwrap_or_else(|_| AppConfig::default().device),
+        };
+        let _ = save_config(&config);
+    }
+
+    fn drain_hid_events(&mut self) {
+        while let Ok(event) = self.hid_events.try_recv() {
+            match event {
+                HidEvent::Mute(is_live) => {
+                    if let Some(status) = &mut self.status {
+                        status.muted = !is_live;
+                    }
+                }
+                HidEvent::Pattern(pattern) => {
+                    self.polar_pattern = pattern;
+                }
+            }
+        }
+    }
+
+    fn refresh_input_peak(&mut self) {
+        if self.last_peak_update.elapsed() < Duration::from_millis(80) {
+            return;
+        }
+        self.last_peak_update = Instant::now();
+        if let Ok(peak) = input_peak_value() {
+            self.input_peak = peak.clamp(0.0, 1.0);
+        }
+    }
+
+    fn refresh_status(&mut self) {
+        match mic_status() {
+            Ok(status) => {
+                self.mic_volume = status.volume;
+                self.status = Some(status);
+                self.status_error = None;
+            }
+            Err(error) => self.status_error = Some(error.to_string()),
+        }
+    }
+
+    fn set_mute(&mut self, muted: bool) {
+        match set_mic_mute(muted) {
+            Ok(()) => self.refresh_status(),
+            Err(error) => self.status_error = Some(error.to_string()),
+        }
+    }
+
+    fn set_volume(&mut self) {
+        match set_mic_volume_percent(self.mic_volume) {
+            Ok(()) => self.refresh_status(),
+            Err(error) => self.status_error = Some(error.to_string()),
+        }
+    }
+
+    fn apply_lighting_to_microphone(&mut self) {
+        if self.lighting_device.is_none() {
+            self.lighting_message = "No supported lighting interface is available.".to_string();
+            log_event("warn", "lighting.apply.no_device", &[]);
+            return;
+        }
+
+        let program = LightingProgram {
+            effect: self.lighting.effect,
+            colors: self
+                .lighting
+                .colors
+                .iter()
+                .map(|color| [color.r(), color.g(), color.b()])
+                .collect(),
+            speed: self.lighting.speed,
+            brightness: self.lighting.brightness,
+        };
+        self.lighting_message = format!(
+            "Applying {} to microphone. It will keep running while this app is open.",
+            program.effect.label()
+        );
+        log_event(
+            "info",
+            "lighting.apply.start",
+            &[("effect", program.effect.as_config().to_string())],
+        );
+
+        if let Some(cancel) = &self.lighting_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.lighting_cancel = Some(cancel.clone());
+
+        thread::spawn(move || {
+            match stream_lighting_program_cancelable(
+                &program,
+                StreamDuration::Forever,
+                Some(cancel),
+            ) {
+                Ok(()) => log_event(
+                    "info",
+                    "lighting.apply.done",
+                    &[("effect", program.effect.as_config().to_string())],
+                ),
+                Err(error) => log_event("error", "lighting.apply.error", &[("message", error)]),
+            }
+        });
+    }
+
+    fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("HyperX QuadCast S");
+            ui.add_space(24.0);
+            let previous_tab = self.tab;
+            tab_button(ui, &mut self.tab, Tab::Audio, "Audio");
+            tab_button(ui, &mut self.tab, Tab::Lights, "Lights");
+            if self.tab != previous_tab {
+                self.save_config_snapshot();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh").clicked() {
+                    self.refresh_status();
+                }
+            });
+        });
+    }
+
+    fn ui_audio(&mut self, ui: &mut egui::Ui) {
+        self.drain_hid_events();
+        self.refresh_input_peak();
+        let muted = self.status.as_ref().is_some_and(|status| status.muted);
+        ui.vertical(|ui| {
+            self.ui_mic_stage(ui);
+            ui.separator();
+            ui.columns(2, |columns| {
+                columns[0].vertical(|ui| {
+                    ui.label("MIC VOLUME");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Slider::new(&mut self.mic_volume, 0..=100).show_value(false))
+                            .changed()
+                        {
+                            self.set_volume();
+                            self.save_config_snapshot();
+                        }
+                        ui.label(format!("{}", self.mic_volume));
+                    });
+
+                    ui.add_space(20.0);
+                    ui.label("INPUT LEVEL");
+                    let display_peak = self.input_peak.sqrt().clamp(0.0, 1.0);
+                    ui.add(
+                        egui::ProgressBar::new(display_peak)
+                            .desired_width(260.0)
+                            .text(format!("{:.1}%", display_peak * 100.0)),
+                    );
+                    ui.small("Speak while turning the bottom gain dial to set hardware gain.");
+
+                    ui.add_space(20.0);
+                    ui.label("MIC MONITORING");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.mic_monitoring, 0..=100)
+                                    .show_value(false),
+                            )
+                            .changed()
+                        {
+                            self.save_config_snapshot();
+                        }
+                        ui.label(format!("{}", self.mic_monitoring));
+                    });
+
+                    ui.add_space(20.0);
+                    ui.label("HEADPHONE VOLUME");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.headphone_volume, 0..=100)
+                                    .show_value(false),
+                            )
+                            .changed()
+                        {
+                            self.save_config_snapshot();
+                        }
+                        ui.label(format!("{}", self.headphone_volume));
+                    });
+
+                    ui.add_space(20.0);
+                    let button_text = if muted {
+                        "Unmute microphone"
+                    } else {
+                        "Mute microphone"
+                    };
+                    if ui.button(button_text).clicked() {
+                        self.set_mute(!muted);
+                    }
+
+                    if ui
+                        .checkbox(
+                            &mut self.mute_on_app_start,
+                            "Mute microphone when app starts",
+                        )
+                        .changed()
+                    {
+                        self.save_config_snapshot();
+                    }
+
+                    if let Some(error) = &self.status_error {
+                        ui.add_space(12.0);
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), error);
+                    }
+                });
+
+                columns[1].vertical(|ui| {
+                    ui.label("POLAR PATTERN");
+                    ui.horizontal(|ui| {
+                        polar_button(ui, "Stereo", self.polar_pattern == PolarPattern::Stereo);
+                        polar_button(ui, "Omni", self.polar_pattern == PolarPattern::Omni);
+                        polar_button(ui, "Cardioid", self.polar_pattern == PolarPattern::Cardioid);
+                        polar_button(
+                            ui,
+                            "Bidirectional",
+                            self.polar_pattern == PolarPattern::Bidirectional,
+                        );
+                    });
+                    ui.add_space(16.0);
+                    ui.strong(self.polar_pattern.label());
+                    ui.label(pattern_description(self.polar_pattern));
+                    ui.add_space(12.0);
+                    ui.label("This follows the physical dial via HID input reports.");
+                });
+            });
+        });
+    }
+
+    fn ui_lights(&mut self, ui: &mut egui::Ui) {
+        self.drain_hid_events();
+        ui.vertical(|ui| {
+            self.ui_mic_stage(ui);
+            ui.separator();
+            ui.columns(4, |columns| {
+                columns[0].vertical(|ui| {
+                    ui.label("EFFECTS");
+                    for effect in [
+                        Effect::Wave,
+                        Effect::Solid,
+                        Effect::Cycle,
+                        Effect::Pulse,
+                        Effect::Blink,
+                        Effect::Lightning,
+                        Effect::VuMeter,
+                    ] {
+                        if ui
+                            .selectable_label(self.lighting.effect == effect, effect.label())
+                            .clicked()
+                        {
+                            self.lighting.effect = effect;
+                            self.save_config_snapshot();
+                        }
+                    }
+                });
+
+                columns[1].vertical(|ui| {
+                    ui.label("TARGET");
+                    ui.horizontal(|ui| {
+                        let _ = ui.selectable_label(true, "All Lights");
+                        ui.add_enabled(false, egui::Button::new("Selection"));
+                    });
+                    ui.add_space(20.0);
+                    ui.label("OPACITY");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.lighting.opacity, 0..=100)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        self.save_config_snapshot();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.small("hidden");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.small("visible");
+                        });
+                    });
+                });
+
+                columns[2].vertical(|ui| {
+                    ui.label("COLOR");
+                    ui.horizontal_wrapped(|ui| {
+                        for index in 0..self.lighting.colors.len() {
+                            let color = self.lighting.colors[index];
+                            let selected = self.lighting.selected_color == index;
+                            let response = color_swatch(ui, color, selected);
+                            if response.clicked() {
+                                self.lighting.selected_color = index;
+                                self.save_config_snapshot();
+                            }
+                        }
+                    });
+                    ui.add_space(10.0);
+                    let mut color_changed = false;
+                    if let Some(color) = self.lighting.colors.get_mut(self.lighting.selected_color)
+                    {
+                        color_changed = ui.color_edit_button_srgba(color).changed();
+                    }
+                    if color_changed {
+                        self.save_config_snapshot();
+                    }
+                    ui.add_space(18.0);
+                    ui.label("BRIGHTNESS");
+                    if ui
+                        .add(egui::Slider::new(&mut self.lighting.brightness, 0..=100))
+                        .changed()
+                    {
+                        self.save_config_snapshot();
+                    }
+                    if ui
+                        .checkbox(&mut self.lighting.live_when_muted, "Lights show live state")
+                        .changed()
+                    {
+                        self.save_config_snapshot();
+                    }
+                });
+
+                columns[3].vertical(|ui| {
+                    ui.label("SPEED");
+                    if ui
+                        .add(egui::Slider::new(&mut self.lighting.speed, 0..=100).show_value(false))
+                        .changed()
+                    {
+                        self.save_config_snapshot();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.small("slow");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.small("fast");
+                        });
+                    });
+                    ui.add_space(24.0);
+                    if ui.button("Apply to Microphone").clicked() {
+                        self.apply_lighting_to_microphone();
+                    }
+                    if ui.button("Stop Lighting Stream").clicked() {
+                        if let Some(cancel) = &self.lighting_cancel {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                        self.lighting_cancel = None;
+                        self.lighting_message = "Lighting stream stopped.".to_string();
+                        log_event("info", "lighting.apply.stop", &[]);
+                    }
+                    ui.add_space(12.0);
+                    if let Some(device) = &self.lighting_device {
+                        ui.small(format!("{} {}", device.manufacturer, device.product));
+                    }
+                    ui.label(&self.lighting_message);
+                });
+            });
+        });
+    }
+
+    fn ui_mic_stage(&self, ui: &mut egui::Ui) {
+        let available = ui.available_width();
+        let height = (ui.available_height() * 0.56).clamp(280.0, 420.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(available, height), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+
+        painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
+        let center = rect.center();
+        let glow_radius = rect.height() * 0.36;
+        for (index, color) in self.lighting.colors.iter().enumerate() {
+            let angle = index as f32 / self.lighting.colors.len() as f32 * std::f32::consts::TAU;
+            let pos = center
+                + egui::vec2(
+                    angle.cos() * glow_radius * 0.9,
+                    angle.sin() * glow_radius * 0.45,
+                );
+            painter.circle_filled(pos, glow_radius * 0.55, color.linear_multiply(0.08));
+        }
+
+        draw_microphone(&painter, center, rect.height());
+
+        if let Some(status) = &self.status {
+            let text = format!(
+                "{} | {}% | {}",
+                status.device.name,
+                status.volume,
+                if status.muted { "Muted" } else { "Live" }
+            );
+            painter.text(
+                rect.left_top() + egui::vec2(16.0, 16.0),
+                egui::Align2::LEFT_TOP,
+                text,
+                egui::FontId::proportional(15.0),
+                egui::Color32::from_rgb(210, 214, 218),
+            );
+        }
+    }
+}
+
+impl eframe::App for MicLiteApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        ui.vertical(|ui| {
+            ui.add_space(8.0);
+            self.ui_top_bar(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            match self.tab {
+                Tab::Audio => self.ui_audio(ui),
+                Tab::Lights => self.ui_lights(ui),
+            }
+        });
+    }
+}
+
+fn tab_button(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
+    let selected = *current == tab;
+    if ui.selectable_label(selected, label).clicked() {
+        *current = tab;
+    }
+}
+
+fn polar_button(ui: &mut egui::Ui, label: &str, selected: bool) {
+    let response = ui.add_sized([88.0, 44.0], egui::Button::new(label).selected(selected));
+    if response.hovered() {
+        response.on_hover_text(label);
+    }
+}
+
+fn color_swatch(ui: &mut egui::Ui, color: egui::Color32, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 34.0), egui::Sense::click());
+    ui.painter().rect_filled(rect, 0.0, color);
+    if selected {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            0.0,
+            egui::Stroke::new(2.0, egui::Color32::WHITE),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response
+}
+
+fn draw_microphone(painter: &egui::Painter, center: egui::Pos2, stage_height: f32) {
+    let body_width = stage_height * 0.18;
+    let body_height = stage_height * 0.58;
+    let top = center.y - body_height * 0.42;
+    let left = center.x - body_width / 2.0;
+    let body =
+        egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(body_width, body_height));
+
+    painter.rect_filled(body, 18.0, egui::Color32::from_rgb(18, 18, 18));
+    painter.rect_stroke(
+        body,
+        18.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 50)),
+        egui::StrokeKind::Outside,
+    );
+
+    let grille = egui::Rect::from_min_max(
+        body.left_top() + egui::vec2(8.0, 42.0),
+        body.right_bottom() - egui::vec2(8.0, body_height * 0.34),
+    );
+    let dot_color = egui::Color32::from_rgb(86, 30, 54);
+    let mut y = grille.top();
+    while y < grille.bottom() {
+        let mut x = grille.left();
+        while x < grille.right() {
+            painter.circle_filled(egui::pos2(x, y), 2.4, dot_color);
+            x += 8.0;
+        }
+        y += 7.0;
+    }
+
+    let mount_y = body.bottom() - body_height * 0.22;
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(center.x, mount_y),
+            egui::vec2(body_width * 1.35, 16.0),
+        ),
+        3.0,
+        egui::Color32::from_rgb(9, 9, 9),
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(center.x, body.bottom() + 36.0),
+            egui::vec2(18.0, 80.0),
+        ),
+        3.0,
+        egui::Color32::from_rgb(12, 12, 12),
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(center.x, body.bottom() + 84.0),
+            egui::vec2(body_width * 1.6, 14.0),
+        ),
+        7.0,
+        egui::Color32::from_rgb(18, 18, 18),
+    );
+}
+
+fn run_gui() {
+    log_event("info", "gui.start", &[]);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("HyperX Mic Lite")
+            .with_inner_size([1120.0, 760.0])
+            .with_min_inner_size([920.0, 620.0]),
+        ..Default::default()
+    };
+
+    let result = eframe::run_native(
+        "HyperX Mic Lite",
+        options,
+        Box::new(|context| {
+            context.egui_ctx.set_visuals(egui::Visuals::dark());
+            Ok(Box::new(MicLiteApp::new()))
+        }),
+    );
+
+    if let Err(error) = result {
+        log_event("error", "gui.error", &[("message", error.to_string())]);
+        eprintln!("{error}");
+        process::exit(1);
+    }
+    log_event("info", "gui.exit", &[]);
+}
+
+fn set_volume(args: &[String]) -> WinResult<()> {
+    if args.len() != 1 {
+        eprintln!("Usage: hyperx-mic-lite volume 75");
+        process::exit(2);
+    }
+
+    let percent = args[0].parse::<u8>().unwrap_or_else(|_| {
+        eprintln!("Volume must be a number from 0 to 100.");
+        process::exit(2);
+    });
+
+    if percent > 100 {
+        eprintln!("Volume must be a number from 0 to 100.");
+        process::exit(2);
+    }
+
+    set_mic_volume_percent(percent)?;
+    print_status_json(&mic_status()?);
+    Ok(())
+}
+
+fn set_mic_mute(muted: bool) -> WinResult<()> {
+    let result =
+        unsafe { endpoint_volume(&default_capture_device()?)?.SetMute(muted, std::ptr::null()) };
+    if result.is_ok() {
+        log_event("info", "audio.mute.set", &[("muted", muted.to_string())]);
+    }
+    result
+}
+
+fn set_mic_volume_percent(percent: u8) -> WinResult<()> {
+    let result = unsafe {
+        endpoint_volume(&default_capture_device()?)?
+            .SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())
+    };
+    if result.is_ok() {
+        log_event(
+            "info",
+            "audio.volume.set",
+            &[("percent", percent.to_string())],
+        );
+    }
+    result
+}
+
+fn input_peak_value() -> WinResult<f32> {
+    let device = default_capture_device()?;
+    let meter = endpoint_meter(&device)?;
+    unsafe { meter.GetPeakValue() }
+}
+
+fn mic_status() -> WinResult<MicStatus> {
+    let device = default_capture_device()?;
+    let mut info = describe_device(&device)?;
+    info.is_default = true;
+
+    let volume = endpoint_volume(&device)?;
+    let scalar = unsafe { volume.GetMasterVolumeLevelScalar()? };
+    let muted = unsafe { volume.GetMute()?.as_bool() };
+
+    Ok(MicStatus {
+        device: info,
+        volume: (scalar * 100.0).round().clamp(0.0, 100.0) as u8,
+        muted,
+    })
+}
+
+fn list_capture_devices() -> WinResult<Vec<DeviceInfo>> {
+    let enumerator = device_enumerator()?;
+    let default_id = default_capture_device_with(&enumerator)
+        .and_then(|device| unsafe { device.GetId() })
+        .map(|id| unsafe { id.to_string().unwrap_or_default() })
+        .unwrap_or_default();
+
+    let collection =
+        unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE(DEVICE_STATEMASK_ALL))? };
+
+    let count = unsafe { collection.GetCount()? };
+    let mut devices = Vec::with_capacity(count as usize);
+
+    for index in 0..count {
+        let device = unsafe { collection.Item(index)? };
+        let mut info = describe_device(&device)?;
+        info.is_default = info.id == default_id;
+        devices.push(info);
+    }
+
+    Ok(devices)
+}
+
+fn default_capture_device() -> WinResult<IMMDevice> {
+    default_capture_device_with(&device_enumerator()?)
+}
+
+fn default_capture_device_with(enumerator: &IMMDeviceEnumerator) -> WinResult<IMMDevice> {
+    unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications) }
+}
+
+fn device_enumerator() -> WinResult<IMMDeviceEnumerator> {
+    unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+}
+
+fn endpoint_volume(device: &IMMDevice) -> WinResult<IAudioEndpointVolume> {
+    unsafe { device.Activate(CLSCTX_ALL, None) }
+}
+
+fn endpoint_meter(device: &IMMDevice) -> WinResult<IAudioMeterInformation> {
+    unsafe { device.Activate(CLSCTX_ALL, None) }
+}
+
+fn describe_device(device: &IMMDevice) -> WinResult<DeviceInfo> {
+    let id = unsafe { device.GetId()?.to_string().unwrap_or_default() };
+    let state = unsafe { device.GetState()? };
+
+    Ok(DeviceInfo {
+        id,
+        name: device_name(device)?,
+        state: state_name(state.0),
+        is_default: false,
+    })
+}
+
+fn device_name(device: &IMMDevice) -> WinResult<String> {
+    let store = unsafe { device.OpenPropertyStore(STGM_READ)? };
+    let mut value = unsafe { store.GetValue(&PKEY_Device_FriendlyName)? };
+    let name = unsafe {
+        value
+            .Anonymous
+            .Anonymous
+            .Anonymous
+            .pwszVal
+            .to_string()
+            .unwrap_or_default()
+    };
+    unsafe { PropVariantClear(&mut value)? };
+
+    if name.trim().is_empty() {
+        Ok("Unknown microphone".to_string())
+    } else {
+        Ok(name)
+    }
+}
+
+fn state_name(state: u32) -> String {
+    match state {
+        value if value == DEVICE_STATE_ACTIVE.0 => "active",
+        value if value == DEVICE_STATE_DISABLED.0 => "disabled",
+        value if value == DEVICE_STATE_NOTPRESENT.0 => "not_present",
+        value if value == DEVICE_STATE_UNPLUGGED.0 => "unplugged",
+        other => return format!("unknown_{other}"),
+    }
+    .to_string()
+}
+
+fn print_devices_json(devices: &[DeviceInfo]) {
+    println!("[");
+    for (index, device) in devices.iter().enumerate() {
+        let comma = if index + 1 == devices.len() { "" } else { "," };
+        println!(
+            "  {{\n    \"id\": \"{}\",\n    \"name\": \"{}\",\n    \"state\": \"{}\",\n    \"isDefault\": {}\n  }}{}",
+            json_escape(&device.id),
+            json_escape(&device.name),
+            json_escape(&device.state),
+            device.is_default,
+            comma
+        );
+    }
+    println!("]");
+}
+
+fn print_status_json(status: &MicStatus) {
+    println!(
+        "{{\n  \"device\": {{\n    \"id\": \"{}\",\n    \"name\": \"{}\",\n    \"state\": \"{}\",\n    \"isDefault\": {}\n  }},\n  \"volume\": {},\n  \"muted\": {}\n}}",
+        json_escape(&status.device.id),
+        json_escape(&status.device.name),
+        json_escape(&status.device.state),
+        status.device.is_default,
+        status.volume,
+        status.muted
+    );
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04x}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
