@@ -649,6 +649,7 @@ fn run() -> WinResult<()> {
         "lighting-solid" => run_lighting_solid(&args[1..]),
         "lighting-effect" => run_lighting_effect(&args[1..]),
         "lighting-vu-test" => run_lighting_vu_test(&args[1..]),
+        "lighting-save" => run_lighting_save(&args[1..]),
         "audio" => run_audio_command(&args[1..])?,
         "config" => run_config_command(&args[1..]),
         "logs" => run_logs_command(&args[1..]),
@@ -707,6 +708,7 @@ Usage:\n\
   hyperx-mic-lite lighting-solid ff0066 [seconds]\n\
   hyperx-mic-lite lighting-effect <solid|wave|cycle|pulse|blink|lightning|vu_meter> [seconds|forever]\n\
   hyperx-mic-lite lighting-vu-test <0-100> [seconds]\n\
+  hyperx-mic-lite lighting-save [--packet-log]\n\
   hyperx-mic-lite config <path|dump|export|import|validate|reset>\n\
   hyperx-mic-lite logs <path|tail>\n\
   hyperx-mic-lite diagnostics export [directory]\n\
@@ -2123,6 +2125,30 @@ fn run_lighting_vu_test(args: &[String]) {
     println!("Streamed VU test level {level}% for {seconds}s");
 }
 
+fn run_lighting_save(args: &[String]) {
+    let (args, packet_log) = split_packet_log_flag(args);
+    if !args.is_empty() {
+        eprintln!("Usage: hyperx-mic-lite lighting-save [--packet-log]");
+        process::exit(2);
+    }
+
+    match save_lighting_to_microphone(packet_log) {
+        Ok(()) => {
+            log_event("info", "lighting.save.done", &[]);
+            println!("Sent experimental Save to Microphone command sequence.");
+        }
+        Err(error) => {
+            log_event(
+                "error",
+                "lighting.save.error",
+                &[("message", error.to_string())],
+            );
+            eprintln!("{error}");
+            process::exit(1);
+        }
+    }
+}
+
 fn split_packet_log_flag(args: &[String]) -> (Vec<&str>, bool) {
     let mut packet_log = false;
     let mut filtered = Vec::new();
@@ -2548,6 +2574,40 @@ fn build_frame_packet(frame: LightingFrame) -> [u8; 64] {
     packet
 }
 
+fn build_save_prepare_packet() -> [u8; 64] {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x04;
+    packet[1] = 0x53;
+    packet[8] = 0x01;
+    packet
+}
+
+fn build_save_state_packet() -> [u8; 64] {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x04;
+    packet[1] = 0x02;
+    packet
+}
+
+fn build_save_commit_packet() -> [u8; 64] {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x04;
+    packet[1] = 0x23;
+    packet[8] = 0x01;
+    packet
+}
+
+fn build_save_sentinel_packet() -> [u8; 64] {
+    let mut packet = [0u8; 64];
+    packet[0] = 0x08;
+    packet[59] = 0x28;
+    packet[60] = 0x01;
+    packet[61] = 0x00;
+    packet[62] = 0xaa;
+    packet[63] = 0x55;
+    packet
+}
+
 fn build_effect_frames(program: &LightingProgram) -> Vec<LightingFrame> {
     let colors = normalized_colors(program);
     match program.effect {
@@ -2792,6 +2852,81 @@ fn send_feature_packet(
     }
 
     Err(errors.join("; "))
+}
+
+fn read_feature_packet(device: &hidapi::HidDevice, packet_log: bool) -> Result<[u8; 64], String> {
+    let mut with_report_id = [0u8; 65];
+    let mut errors = Vec::new();
+    match device.get_feature_report(&mut with_report_id) {
+        Ok(length) if length >= 65 => {
+            let mut packet = [0u8; 64];
+            packet.copy_from_slice(&with_report_id[1..65]);
+            log_hid_packet_attempt(packet_log, "feature-read+id", true, &packet, None);
+            return Ok(packet);
+        }
+        Ok(length) => errors.push(format!("feature-read+id: short report length {length}")),
+        Err(error) => errors.push(format!("feature-read+id: {error}")),
+    }
+
+    let mut packet = [0u8; 64];
+    match device.get_feature_report(&mut packet) {
+        Ok(length) if length >= 64 => {
+            log_hid_packet_attempt(packet_log, "feature-read", true, &packet, None);
+            Ok(packet)
+        }
+        Ok(length) => Err(format!(
+            "Unable to read feature report. Short report length {length}. Previous errors: {}",
+            errors.join("; ")
+        )),
+        Err(error) => {
+            errors.push(format!("feature-read: {error}"));
+            Err(format!(
+                "Unable to read feature report: {}",
+                errors.join("; ")
+            ))
+        }
+    }
+}
+
+fn save_lighting_to_microphone(packet_log: bool) -> Result<(), String> {
+    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+    let info = api
+        .device_list()
+        .filter(|device| is_supported_lighting_device(device))
+        .max_by_key(|device| lighting_device_score(device))
+        .ok_or_else(|| "No supported QuadCast S lighting HID interface detected.".to_string())?;
+
+    let device = api
+        .open_path(info.path())
+        .map_err(|error| error.to_string())?;
+
+    send_feature_packet(&device, &build_save_prepare_packet(), packet_log)?;
+    send_feature_packet(&device, &build_save_state_packet(), packet_log)?;
+    if let Err(error) = read_feature_packet(&device, packet_log) {
+        log_event(
+            "warn",
+            "lighting.save.readback.error",
+            &[("message", error)],
+        );
+    }
+    send_feature_packet(&device, &build_save_commit_packet(), packet_log)?;
+    if let Err(error) = read_feature_packet(&device, packet_log) {
+        log_event(
+            "warn",
+            "lighting.save.readback.error",
+            &[("message", error)],
+        );
+    }
+    send_feature_packet(&device, &build_save_sentinel_packet(), packet_log)?;
+    send_feature_packet(&device, &build_save_state_packet(), packet_log)?;
+    if let Err(error) = read_feature_packet(&device, packet_log) {
+        log_event(
+            "warn",
+            "lighting.save.readback.error",
+            &[("message", error)],
+        );
+    }
+    Ok(())
 }
 
 fn write_solid_lighting_once(
@@ -3091,6 +3226,20 @@ impl MicLiteApp {
         });
     }
 
+    fn save_lighting_to_microphone(&mut self) {
+        if self.lighting_device.is_none() {
+            self.lighting_message = "No supported lighting interface is available.".to_string();
+            log_event("warn", "lighting.save.no_device", &[]);
+            return;
+        }
+        self.lighting_message =
+            "Saving current microphone lighting to device memory...".to_string();
+        thread::spawn(move || match save_lighting_to_microphone(false) {
+            Ok(()) => log_event("info", "lighting.save.done", &[]),
+            Err(error) => log_event("error", "lighting.save.error", &[("message", error)]),
+        });
+    }
+
     fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("HyperX QuadCast S");
@@ -3333,6 +3482,13 @@ impl MicLiteApp {
                     ui.add_space(24.0);
                     if ui.button("Apply to Microphone").clicked() {
                         self.apply_lighting_to_microphone();
+                    }
+                    if ui
+                        .button("Save to Microphone")
+                        .on_hover_text("Experimental persistent device write")
+                        .clicked()
+                    {
+                        self.save_lighting_to_microphone();
                     }
                     if ui.button("Stop Lighting Stream").clicked() {
                         if let Some(cancel) = &self.lighting_cancel {

@@ -43,8 +43,8 @@
 - [x] Capture and document native mic monitoring, headphone volume, mic volume, and toggle USB Audio Class writes.
 - [x] Add USB Audio Class/Core Audio topology writes for mic monitoring, headphone volume, mic volume, and their mute toggles.
 - [x] Capture and document native Wave/VU-style lighting frames and `Save to Microphone`.
-- Expand lighting packet rendering from 2 cells to the native 16-cell frame layout.
-- Add an explicit, experimental `Save to Microphone` action for persistent device lighting writes.
+- [x] Expand lighting packet rendering from 2 cells to the native 16-cell frame layout.
+- [x] Add an explicit, experimental `Save to Microphone` action for persistent device lighting writes.
 - [x] Capture and document live/muted lighting, save-solid, reset-default, and startup-only behavior.
 - Keep persistent device writes explicit; do not auto-save lighting or live/muted policy during normal Apply.
 - Do not implement reset-default until the command is isolated more safely.
