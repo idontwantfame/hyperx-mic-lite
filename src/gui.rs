@@ -31,6 +31,7 @@ use crate::{
     },
     logging::log_event,
     model::{Effect, HidEvent, LightTarget, LightingDevice, MicStatus, PolarPattern, Tab},
+    mqtt::{MqttBridge, MqttCommand, MqttStateSnapshot, start_mqtt_runtime},
     paths::log_file_path,
     tray::TrayHandle,
 };
@@ -76,6 +77,9 @@ pub(crate) struct MicLiteApp {
     lighting_events: Receiver<LightingUiEvent>,
     lighting_event_sender: Sender<LightingUiEvent>,
     lighting_notice: Option<UiNotice>,
+    mqtt_bridge: Option<MqttBridge>,
+    mqtt_commands: Option<Receiver<MqttCommand>>,
+    last_mqtt_publish: Instant,
     lighting_autostart_applied: bool,
     minimize_to_tray: bool,
     hidden_to_tray: bool,
@@ -107,6 +111,7 @@ impl MicLiteApp {
             .filter_map(|color| parse_rgb_hex(color).ok())
             .map(|rgb| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
             .collect::<Vec<_>>();
+        let mqtt_runtime = start_mqtt_runtime(&config.mqtt);
         let mut app = Self {
             tab: Tab::from_config(&config.ui.selected_tab),
             status: None,
@@ -159,6 +164,9 @@ impl MicLiteApp {
             lighting_events,
             lighting_event_sender,
             lighting_notice: None,
+            mqtt_bridge: mqtt_runtime.as_ref().map(|runtime| runtime.bridge.clone()),
+            mqtt_commands: mqtt_runtime.map(|runtime| runtime.commands),
+            last_mqtt_publish: Instant::now(),
             lighting_autostart_applied: false,
             minimize_to_tray: config.ui.minimize_to_tray,
             hidden_to_tray: false,
@@ -241,6 +249,9 @@ impl MicLiteApp {
             device: load_or_create_config()
                 .map(|config| config.device)
                 .unwrap_or_else(|_| AppConfig::default().device),
+            mqtt: load_or_create_config()
+                .map(|config| config.mqtt)
+                .unwrap_or_else(|_| AppConfig::default().mqtt),
         };
         let _ = save_config(&config);
     }
@@ -330,6 +341,90 @@ impl MicLiteApp {
         }
     }
 
+    fn drain_mqtt_commands(&mut self) {
+        let mut commands = Vec::new();
+        if let Some(receiver) = &self.mqtt_commands {
+            while let Ok(command) = receiver.try_recv() {
+                commands.push(command);
+            }
+        }
+        for command in commands {
+            self.apply_mqtt_command(command);
+        }
+    }
+
+    fn apply_mqtt_command(&mut self, command: MqttCommand) {
+        log_event(
+            "info",
+            "mqtt.command",
+            &[("command", format!("{command:?}"))],
+        );
+        match command {
+            MqttCommand::SetMute(muted) => self.set_mute(muted),
+            MqttCommand::ToggleMute => {
+                let muted = self.is_muted();
+                self.set_mute(!muted);
+            }
+            MqttCommand::SetMicVolume(value) => {
+                self.mic_volume = value;
+                self.set_volume();
+                self.save_config_snapshot();
+            }
+            MqttCommand::SetMonitoringVolume(value) => {
+                self.mic_monitoring = value;
+                self.set_mic_monitoring();
+                self.save_config_snapshot();
+            }
+            MqttCommand::SetHeadphoneVolume(value) => {
+                self.headphone_volume = value;
+                self.set_headphone_volume();
+                self.save_config_snapshot();
+            }
+            MqttCommand::SetEffect(effect) => {
+                self.lighting.effect = effect;
+                self.save_config_snapshot();
+                self.apply_lighting_to_microphone();
+            }
+            MqttCommand::SetTarget(target) => {
+                self.lighting.target = target;
+                self.save_config_snapshot();
+                self.apply_lighting_to_microphone();
+            }
+            MqttCommand::SetBrightness(value) => {
+                self.lighting.brightness = value;
+                self.save_config_snapshot();
+                self.apply_lighting_to_microphone();
+            }
+            MqttCommand::SetSpeed(value) => {
+                self.lighting.speed = value;
+                self.save_config_snapshot();
+                self.apply_lighting_to_microphone();
+            }
+            MqttCommand::SetOpacity(value) => {
+                self.lighting.opacity = value;
+                self.save_config_snapshot();
+                self.apply_lighting_to_microphone();
+            }
+            MqttCommand::SetLiveWhenMuted(enabled) => {
+                self.lighting.live_when_muted = enabled;
+                self.save_config_snapshot();
+            }
+            MqttCommand::ApplyLighting => self.apply_lighting_to_microphone(),
+            MqttCommand::StopLighting => {
+                if let Some(cancel) = &self.lighting_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                self.lighting_cancel = None;
+                self.lighting_notice = Some(UiNotice {
+                    severity: NoticeSeverity::Info,
+                    message: "Lighting stream stopped from MQTT.".to_string(),
+                });
+            }
+            MqttCommand::SaveLighting => self.save_lighting_to_microphone(),
+        }
+        self.publish_mqtt_state();
+    }
+
     fn refresh_input_peak(&mut self) {
         if self.last_peak_update.elapsed() < Duration::from_millis(80) {
             return;
@@ -373,6 +468,58 @@ impl MicLiteApp {
         }
         self.last_status_update = Instant::now();
         self.refresh_status();
+    }
+
+    fn publish_mqtt_state_periodic(&mut self) {
+        if self.last_mqtt_publish.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.publish_mqtt_state();
+    }
+
+    fn publish_mqtt_state(&mut self) {
+        self.last_mqtt_publish = Instant::now();
+        let Some(bridge) = &self.mqtt_bridge else {
+            return;
+        };
+        let (available, device_name, device_state, muted, mic_volume) =
+            if let Some(status) = &self.status {
+                (
+                    status.device.state == "active",
+                    status.device.name.clone(),
+                    status.device.state.clone(),
+                    self.is_muted(),
+                    status.volume,
+                )
+            } else {
+                (
+                    false,
+                    "Unavailable".to_string(),
+                    self.status_error
+                        .clone()
+                        .unwrap_or_else(|| "unavailable".to_string()),
+                    self.is_muted(),
+                    self.mic_volume,
+                )
+            };
+        bridge.publish_state(&MqttStateSnapshot {
+            available,
+            device_name,
+            device_state,
+            muted,
+            mic_volume,
+            mic_monitoring: self.mic_monitoring,
+            headphone_volume: self.headphone_volume,
+            input_level_percent: self.input_peak.sqrt().clamp(0.0, 1.0) * 100.0,
+            polar_pattern: self.polar_pattern.as_config().to_string(),
+            lighting_available: self.lighting_device.is_some(),
+            effect: self.lighting.effect.as_config().to_string(),
+            target: self.lighting.target.as_config().to_string(),
+            brightness: self.lighting.brightness,
+            speed: self.lighting.speed,
+            opacity: self.lighting.opacity,
+            live_when_muted: self.lighting.live_when_muted,
+        });
     }
 
     fn is_muted(&self) -> bool {
@@ -706,8 +853,10 @@ impl MicLiteApp {
     fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
         self.drain_hid_events();
         self.drain_lighting_events();
+        self.drain_mqtt_commands();
         self.refresh_status_periodic();
         self.refresh_input_peak();
+        self.publish_mqtt_state_periodic();
         let stage_height = self.dashboard_stage_height.clamp(240.0, 264.0);
         self.ui_mic_stage(ui, stage_height);
         if self.layout_edit {

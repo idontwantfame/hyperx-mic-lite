@@ -177,6 +177,9 @@ fn redact_json_value(value: serde_json::Value) -> serde_json::Value {
                     if lower.contains("path")
                         || lower.contains("endpoint_id")
                         || lower.ends_with("_id")
+                        || lower.contains("password")
+                        || lower.contains("token")
+                        || lower.contains("secret")
                     {
                         (key, serde_json::Value::String("<redacted>".to_string()))
                     } else {

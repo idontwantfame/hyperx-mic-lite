@@ -111,6 +111,33 @@ Important lifecycle and failure events are also written to the Windows Applicati
 
 Diagnostics export creates a folder containing a manifest, redacted config, recent app log, service health, Core Audio device/status JSON, and HID report-size details for supported lighting interfaces. Use `--packet-log` on lighting commands when protocol work needs packet-level HID write logs.
 
+MQTT and Home Assistant:
+
+MQTT is disabled by default. Enable it in the JSON config from `config path`, then start the GUI. The broker URL supports old/simple and modern transports through the URL scheme:
+
+```json
+{
+  "mqtt": {
+    "enabled": true,
+    "url": "mqtt://homeassistant.local:1883",
+    "client_id": "hyperx-mic-lite",
+    "username": "mqtt-user",
+    "password": "mqtt-password",
+    "base_topic": "hyperx_mic_lite/quadcast_s",
+    "discovery_prefix": "homeassistant",
+    "home_assistant_discovery": true,
+    "retain_state": true,
+    "qos": 1,
+    "keep_alive_secs": 30,
+    "clean_session": true
+  }
+}
+```
+
+Supported URL schemes are `mqtt://` or `tcp://` for plain MQTT, `mqtts://` or `ssl://` for TLS using system roots, `ws://` for WebSocket, and `wss://` for secure WebSocket. Home Assistant discovery is published under `homeassistant/.../config` when enabled.
+
+State topics live under `hyperx_mic_lite/quadcast_s/state/...`; command topics live under `hyperx_mic_lite/quadcast_s/command/...`. Writable command keys include `mute`, `mic_volume`, `mic_monitoring`, `headphone_volume`, `effect`, `target`, `brightness`, `speed`, `opacity`, `live_when_muted`, `apply`, `stop`, and `save`.
+
 Windows service:
 
 ```powershell
