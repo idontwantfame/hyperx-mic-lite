@@ -137,6 +137,6 @@ The startup command does not require admin. It launches the GUI for the current 
 
 ## Limits
 
-Use the release binary for normal testing. The Lights tab detects the QuadCast S HID controller and can apply Solid, Wave, Cycle, Pulse, Blink, Lightning, and VU Meter effects through the packet writer. GUI lighting streams keep running while the app is open, and CLI effects run forever when `forever` is passed.
+Use the release binary for normal testing. The Lights tab detects the QuadCast S HID controller and can apply Solid, Wave, Cycle, Pulse, Blink, Lightning, and VU Meter effects through the packet writer. GUI lighting streams keep running while the app is open, and CLI effects run forever when `forever` is passed. VU Meter uses smoothed attack/release levels with flame-style colors, and the live-state option writes green/red lighting from HID mute reports.
 
 The Audio tab includes a persisted `Mute microphone when app starts` option.

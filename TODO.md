@@ -36,6 +36,6 @@
 
 - [x] Promote `lighting-solid` into the GUI Apply button.
 - [x] Add packet builders for Wave, Cycle, Pulse, Blink, Lightning, and VU Meter.
-- Smooth the VU Meter lighting effect with attack/release timing and better bottom-to-top flame gradients(need to be flame colour too).
-- Add live/muted lighting behavior that follows HID mute reports.
+- [x] Smooth the VU Meter lighting effect with attack/release timing and better bottom-to-top flame gradients(need to be flame colour too).
+- [x] Add live/muted lighting behavior that follows HID mute reports.
 - Do a guided USBPcap + Wireshark capture session together to inspect what the original HyperX software sends for mic monitoring, headphone volume, lighting effects, and any hidden gain/dial controls.

@@ -2358,6 +2358,7 @@ fn stream_lighting_program_cancelable(
     let started = std::time::Instant::now();
     let mut index = 0usize;
     let frame_delay = effect_frame_delay(program.speed);
+    let mut vu_level = 0.0f32;
 
     while match duration {
         StreamDuration::Timed(duration) => started.elapsed() < duration,
@@ -2370,7 +2371,9 @@ fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if program.effect == Effect::VuMeter {
-            build_vu_frame(input_peak_value().unwrap_or(0.0), program.brightness)
+            let target = input_peak_value().unwrap_or(0.0).sqrt().clamp(0.0, 1.0);
+            vu_level = smooth_vu_level(vu_level, target);
+            build_vu_frame(vu_level, program.brightness)
         } else {
             let frame = frames[index % frames.len()];
             index += 1;
@@ -2514,8 +2517,13 @@ fn lightning_frames(colors: &[[u8; 3]], speed: u8) -> Vec<[[u8; 3]; 2]> {
     frames
 }
 
-fn build_vu_frame(peak: f32, brightness: u8) -> [[u8; 3]; 2] {
-    let level = peak.sqrt().clamp(0.0, 1.0);
+fn smooth_vu_level(current: f32, target: f32) -> f32 {
+    let coefficient = if target > current { 0.42 } else { 0.10 };
+    current + (target - current) * coefficient
+}
+
+fn build_vu_frame(level: f32, brightness: u8) -> [[u8; 3]; 2] {
+    let level = level.clamp(0.0, 1.0);
     let lower_strength = (level * 2.0).clamp(0.0, 1.0);
     let upper_strength = ((level - 0.5) * 2.0).clamp(0.0, 1.0);
     let lower = vu_color(lower_strength, brightness);
@@ -2528,20 +2536,29 @@ fn build_vu_frame(peak: f32, brightness: u8) -> [[u8; 3]; 2] {
 }
 
 fn vu_color(strength: f32, brightness: u8) -> [u8; 3] {
-    let base = if strength < 0.55 {
-        [0, 255, 64]
-    } else if strength < 0.82 {
-        [255, 190, 0]
+    let base = if strength < 0.35 {
+        lerp_color_float([45, 0, 0], [255, 42, 0], strength / 0.35)
+    } else if strength < 0.72 {
+        lerp_color_float([255, 42, 0], [255, 185, 0], (strength - 0.35) / 0.37)
     } else {
-        [255, 24, 12]
+        lerp_color_float([255, 185, 0], [255, 255, 210], (strength - 0.72) / 0.28)
     };
-    let effective = ((strength * brightness as f32).round() as u8).clamp(3, 100);
+    let effective = ((strength * brightness as f32).round() as u8).clamp(4, 100);
     scale_color(base, effective)
 }
 
 fn lerp_color(start: [u8; 3], end: [u8; 3], step: usize, steps: usize) -> [u8; 3] {
     let denominator = steps.saturating_sub(1).max(1) as f32;
     let t = step as f32 / denominator;
+    [
+        (start[0] as f32 + (end[0] as f32 - start[0] as f32) * t).round() as u8,
+        (start[1] as f32 + (end[1] as f32 - start[1] as f32) * t).round() as u8,
+        (start[2] as f32 + (end[2] as f32 - start[2] as f32) * t).round() as u8,
+    ]
+}
+
+fn lerp_color_float(start: [u8; 3], end: [u8; 3], t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
     [
         (start[0] as f32 + (end[0] as f32 - start[0] as f32) * t).round() as u8,
         (start[1] as f32 + (end[1] as f32 - start[1] as f32) * t).round() as u8,
@@ -2618,6 +2635,29 @@ fn send_feature_packet(
     }
 
     Err(errors.join("; "))
+}
+
+fn write_solid_lighting_once(
+    color: [u8; 3],
+    brightness: u8,
+    packet_log: bool,
+) -> Result<(), String> {
+    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+    let info = api
+        .device_list()
+        .filter(|device| is_supported_lighting_device(device))
+        .max_by_key(|device| lighting_device_score(device))
+        .ok_or_else(|| "No supported QuadCast S lighting HID interface detected.".to_string())?;
+    let device = api
+        .open_path(info.path())
+        .map_err(|error| error.to_string())?;
+    let color = scale_color(color, brightness);
+    send_feature_packet(&device, &build_display_header_packet(), packet_log)?;
+    send_feature_packet(&device, &build_frame_packet([color, color]), packet_log)
+}
+
+fn live_mute_lighting_color(is_live: bool) -> [u8; 3] {
+    if is_live { [0, 255, 70] } else { [255, 0, 28] }
 }
 
 fn log_hid_packet_attempt(
@@ -2753,6 +2793,9 @@ impl MicLiteApp {
                     if let Some(status) = &mut self.status {
                         status.muted = !is_live;
                     }
+                    if self.lighting.live_when_muted {
+                        self.apply_live_mute_lighting(is_live);
+                    }
                 }
                 HidEvent::Pattern(pattern) => {
                     self.polar_pattern = pattern;
@@ -2794,6 +2837,30 @@ impl MicLiteApp {
             Ok(()) => self.refresh_status(),
             Err(error) => self.status_error = Some(error.to_string()),
         }
+    }
+
+    fn apply_live_mute_lighting(&mut self, is_live: bool) {
+        if let Some(cancel) = &self.lighting_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.lighting_cancel = None;
+        let color = live_mute_lighting_color(is_live);
+        let brightness = self.lighting.brightness;
+        self.lighting_message = if is_live {
+            "Showing live microphone lighting.".to_string()
+        } else {
+            "Showing muted microphone lighting.".to_string()
+        };
+        log_event(
+            "info",
+            "lighting.live_mute.apply",
+            &[("live", is_live.to_string())],
+        );
+        thread::spawn(move || {
+            if let Err(error) = write_solid_lighting_once(color, brightness, false) {
+                log_event("error", "lighting.live_mute.error", &[("message", error)]);
+            }
+        });
     }
 
     fn apply_lighting_to_microphone(&mut self) {
@@ -3061,6 +3128,12 @@ impl MicLiteApp {
                         .changed()
                     {
                         self.save_config_snapshot();
+                        if self.lighting.live_when_muted {
+                            if let Some(is_live) = self.status.as_ref().map(|status| !status.muted)
+                            {
+                                self.apply_live_mute_lighting(is_live);
+                            }
+                        }
                     }
                 });
 
