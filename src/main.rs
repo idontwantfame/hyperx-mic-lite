@@ -2830,21 +2830,28 @@ fn vu_target_level(raw_peak: f32) -> f32 {
 fn build_vu_frame(level: f32, brightness: u8, tick: u32) -> LightingFrame {
     let level = level.clamp(0.0, 1.0);
     let visible_level = level.powf(0.55).max(0.04);
-    let flame_height = 0.10 + visible_level * 0.88;
-    let mut frame = solid_frame([0, 0, 0]);
-    for (cell, slot) in frame.iter_mut().enumerate() {
-        let height = cell as f32 / (LIGHTING_CELL_COUNT - 1) as f32;
-        let wave = flame_wave(cell, tick);
-        let reach = (flame_height + wave * 0.16).clamp(0.12, 1.0);
-        let heat = if height <= reach {
-            let within_flame = (height / reach).clamp(0.0, 1.0);
-            let body = 1.0 - within_flame * 0.50;
-            (body + wave * 0.22 + visible_level * 0.10).clamp(0.18, 1.0)
+    let lit_cells = ((visible_level * LIGHTING_CELL_COUNT as f32).ceil() as usize)
+        .clamp(1, LIGHTING_CELL_COUNT);
+    let mut frame = solid_frame(scale_color([10, 0, 0], brightness.max(70)));
+
+    for cell in 0..LIGHTING_CELL_COUNT {
+        let active = cell < lit_cells;
+        let physical_cell = LIGHTING_CELL_COUNT - 1 - cell;
+        if active {
+            let position = if lit_cells <= 1 {
+                0.0
+            } else {
+                cell as f32 / (lit_cells - 1) as f32
+            };
+            let shimmer = ((flame_wave(cell, tick) + 1.0) * 0.5).clamp(0.0, 1.0);
+            frame[physical_cell] = vu_flame_color(position, shimmer, brightness.max(95));
         } else {
-            let fade = ((height - reach) / 0.22).clamp(0.0, 1.0);
-            (0.20 * (1.0 - fade) + wave * 0.05).clamp(0.0, 0.22)
-        };
-        *slot = vu_flame_color(height, heat, brightness.max(85));
+            let distance = cell.saturating_sub(lit_cells) as f32;
+            if distance < 2.0 {
+                let afterglow = (2.0 - distance) / 2.0;
+                frame[physical_cell] = scale_color([80, 4, 0], (afterglow * 35.0) as u8);
+            }
+        }
     }
     frame
 }
@@ -2855,17 +2862,15 @@ fn flame_wave(cell: usize, tick: u32) -> f32 {
     (phase_a.sin() * 0.65 + phase_b.sin() * 0.35).clamp(-1.0, 1.0)
 }
 
-fn vu_flame_color(height: f32, heat: f32, brightness: u8) -> [u8; 3] {
-    let base = if heat <= 0.02 {
-        [0, 0, 0]
-    } else if height < 0.22 {
-        lerp_color_float([170, 20, 0], [255, 190, 18], heat)
-    } else if height < 0.62 {
-        lerp_color_float([255, 220, 28], [255, 72, 0], height / 0.62)
+fn vu_flame_color(position: f32, shimmer: f32, brightness: u8) -> [u8; 3] {
+    let base = if position < 0.45 {
+        lerp_color_float([255, 245, 120], [255, 170, 0], position / 0.45)
+    } else if position < 0.78 {
+        lerp_color_float([255, 170, 0], [255, 38, 0], (position - 0.45) / 0.33)
     } else {
-        lerp_color_float([255, 54, 0], [145, 0, 0], (height - 0.62) / 0.38)
+        lerp_color_float([255, 38, 0], [160, 0, 0], (position - 0.78) / 0.22)
     };
-    let effective = ((0.18 + heat * 0.82) * brightness as f32).round() as u8;
+    let effective = ((0.78 + shimmer * 0.22) * brightness as f32).round() as u8;
     scale_color(base, effective)
 }
 
