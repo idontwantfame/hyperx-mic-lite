@@ -4,7 +4,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::Receiver,
+        mpsc::{self, Receiver, Sender},
     },
     thread,
     time::{Duration, Instant},
@@ -34,6 +34,27 @@ use crate::{
     paths::log_file_path,
     tray::TrayHandle,
 };
+
+enum LightingUiEvent {
+    Applied,
+    ApplyFailed(String),
+    Saved,
+    SaveFailed(String),
+}
+
+#[derive(Clone, Copy)]
+enum NoticeSeverity {
+    Good,
+    Info,
+    Warning,
+    Error,
+}
+
+struct UiNotice {
+    severity: NoticeSeverity,
+    message: String,
+}
+
 pub(crate) struct MicLiteApp {
     tab: Tab,
     status: Option<MicStatus>,
@@ -52,6 +73,9 @@ pub(crate) struct MicLiteApp {
     lighting: LightingState,
     lighting_device: Option<LightingDevice>,
     lighting_cancel: Option<Arc<AtomicBool>>,
+    lighting_events: Receiver<LightingUiEvent>,
+    lighting_event_sender: Sender<LightingUiEvent>,
+    lighting_notice: Option<UiNotice>,
     lighting_autostart_applied: bool,
     minimize_to_tray: bool,
     hidden_to_tray: bool,
@@ -75,6 +99,7 @@ pub(crate) struct MicLiteApp {
 impl MicLiteApp {
     pub(crate) fn new(start_minimized: bool, layout_edit: bool) -> Self {
         let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+        let (lighting_event_sender, lighting_events) = mpsc::channel();
         let colors = config
             .lighting
             .colors
@@ -131,6 +156,9 @@ impl MicLiteApp {
             },
             lighting_device: detect_lighting_device(),
             lighting_cancel: None,
+            lighting_events,
+            lighting_event_sender,
+            lighting_notice: None,
             lighting_autostart_applied: false,
             minimize_to_tray: config.ui.minimize_to_tray,
             hidden_to_tray: false,
@@ -279,6 +307,29 @@ impl MicLiteApp {
         }
     }
 
+    fn drain_lighting_events(&mut self) {
+        while let Ok(event) = self.lighting_events.try_recv() {
+            self.lighting_notice = Some(match event {
+                LightingUiEvent::Applied => UiNotice {
+                    severity: NoticeSeverity::Good,
+                    message: "Lighting stream is running.".to_string(),
+                },
+                LightingUiEvent::ApplyFailed(error) => UiNotice {
+                    severity: NoticeSeverity::Error,
+                    message: format!("Lighting write failed: {error}"),
+                },
+                LightingUiEvent::Saved => UiNotice {
+                    severity: NoticeSeverity::Good,
+                    message: "Lighting saved to microphone memory.".to_string(),
+                },
+                LightingUiEvent::SaveFailed(error) => UiNotice {
+                    severity: NoticeSeverity::Error,
+                    message: format!("Persistent save failed: {error}"),
+                },
+            });
+        }
+    }
+
     fn refresh_input_peak(&mut self) {
         if self.last_peak_update.elapsed() < Duration::from_millis(80) {
             return;
@@ -300,6 +351,20 @@ impl MicLiteApp {
             }
             Err(error) => self.status_error = Some(error.to_string()),
         }
+    }
+
+    fn refresh_devices(&mut self) {
+        self.refresh_status();
+        self.lighting_device = detect_lighting_device();
+        self.lighting_notice = None;
+        log_event(
+            "info",
+            "gui.devices.refresh",
+            &[(
+                "lighting_detected",
+                self.lighting_device.is_some().to_string(),
+            )],
+        );
     }
 
     fn refresh_status_periodic(&mut self) {
@@ -368,6 +433,12 @@ impl MicLiteApp {
     fn apply_lighting_to_microphone(&mut self) {
         if self.lighting_device.is_none() {
             log_event("warn", "lighting.apply.no_device", &[]);
+            self.lighting_notice = Some(UiNotice {
+                severity: NoticeSeverity::Warning,
+                message:
+                    "Lighting controller not detected. Connect the QuadCast S and close NGENUITY."
+                        .to_string(),
+            });
             return;
         }
 
@@ -424,6 +495,11 @@ impl MicLiteApp {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         self.lighting_cancel = Some(cancel.clone());
+        self.lighting_notice = Some(UiNotice {
+            severity: NoticeSeverity::Info,
+            message: format!("Applying {} lighting.", program.effect.label()),
+        });
+        let sender = self.lighting_event_sender.clone();
 
         thread::spawn(move || {
             match stream_lighting_program_cancelable(
@@ -432,12 +508,18 @@ impl MicLiteApp {
                 Some(cancel),
                 false,
             ) {
-                Ok(()) => log_event(
-                    "info",
-                    "lighting.apply.done",
-                    &[("effect", program.effect.as_config().to_string())],
-                ),
-                Err(error) => log_event("error", "lighting.apply.error", &[("message", error)]),
+                Ok(()) => {
+                    let _ = sender.send(LightingUiEvent::Applied);
+                    log_event(
+                        "info",
+                        "lighting.apply.done",
+                        &[("effect", program.effect.as_config().to_string())],
+                    );
+                }
+                Err(error) => {
+                    let _ = sender.send(LightingUiEvent::ApplyFailed(error.clone()));
+                    log_event("error", "lighting.apply.error", &[("message", error)]);
+                }
             }
         });
     }
@@ -445,11 +527,27 @@ impl MicLiteApp {
     fn save_lighting_to_microphone(&mut self) {
         if self.lighting_device.is_none() {
             log_event("warn", "lighting.save.no_device", &[]);
+            self.lighting_notice = Some(UiNotice {
+                severity: NoticeSeverity::Warning,
+                message: "Lighting controller not detected. Persistent save is unavailable."
+                    .to_string(),
+            });
             return;
         }
+        self.lighting_notice = Some(UiNotice {
+            severity: NoticeSeverity::Info,
+            message: "Saving lighting to microphone memory.".to_string(),
+        });
+        let sender = self.lighting_event_sender.clone();
         thread::spawn(move || match save_lighting_to_microphone(false) {
-            Ok(()) => log_event("info", "lighting.save.done", &[]),
-            Err(error) => log_event("error", "lighting.save.error", &[("message", error)]),
+            Ok(()) => {
+                let _ = sender.send(LightingUiEvent::Saved);
+                log_event("info", "lighting.save.done", &[]);
+            }
+            Err(error) => {
+                let _ = sender.send(LightingUiEvent::SaveFailed(error.clone()));
+                log_event("error", "lighting.save.error", &[("message", error)]);
+            }
         });
     }
 
@@ -465,7 +563,7 @@ impl MicLiteApp {
                 .on_hover_text("Settings");
                 ui.add_space(6.0);
                 if ui.button("⟳").on_hover_text("Refresh").clicked() {
-                    self.refresh_status();
+                    self.refresh_devices();
                 }
                 if self.layout_edit {
                     ui.label(egui::RichText::new("Layout edit").color(egui::Color32::YELLOW));
@@ -607,6 +705,7 @@ impl MicLiteApp {
 
     fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
         self.drain_hid_events();
+        self.drain_lighting_events();
         self.refresh_status_periodic();
         self.refresh_input_peak();
         let stage_height = self.dashboard_stage_height.clamp(240.0, 264.0);
@@ -673,6 +772,61 @@ impl MicLiteApp {
         });
     }
 
+    fn device_status_notices(&self) -> Vec<UiNotice> {
+        let mut notices = Vec::new();
+        match (&self.status, &self.status_error) {
+            (Some(status), _) => {
+                if status.device.state != "active" {
+                    notices.push(UiNotice {
+                        severity: NoticeSeverity::Error,
+                        message: format!(
+                            "Microphone is {}: {}",
+                            status.device.state, status.device.name
+                        ),
+                    });
+                } else if !is_expected_hyperx_device_name(&status.device.name) {
+                    notices.push(UiNotice {
+                        severity: NoticeSeverity::Warning,
+                        message: format!("Default input is not QuadCast S: {}", status.device.name),
+                    });
+                }
+            }
+            (None, Some(error)) => notices.push(UiNotice {
+                severity: NoticeSeverity::Error,
+                message: format!("Microphone unavailable: {error}"),
+            }),
+            (None, None) => notices.push(UiNotice {
+                severity: NoticeSeverity::Error,
+                message: "Microphone unavailable.".to_string(),
+            }),
+        }
+
+        if self.lighting_device.is_none() {
+            notices.push(UiNotice {
+                severity: NoticeSeverity::Warning,
+                message: "Lighting HID not detected; effects and persistent save are unavailable."
+                    .to_string(),
+            });
+        }
+
+        if self.input_monitor.is_none() {
+            notices.push(UiNotice {
+                severity: NoticeSeverity::Warning,
+                message:
+                    "Input meter unavailable; capture level monitoring is unsupported or busy."
+                        .to_string(),
+            });
+        }
+
+        if notices.is_empty() {
+            notices.push(UiNotice {
+                severity: NoticeSeverity::Good,
+                message: "Audio and lighting devices ready.".to_string(),
+            });
+        }
+        notices
+    }
+
     fn ui_audio_panel(&mut self, ui: &mut egui::Ui) {
         let muted = self.is_muted();
         ui.add_space(4.0);
@@ -727,6 +881,16 @@ impl MicLiteApp {
                 if let Some(error) = &self.status_error {
                     ui.add_space(8.0);
                     ui.colored_label(egui::Color32::from_rgb(255, 120, 120), error);
+                } else if self
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| !is_expected_hyperx_device_name(&status.device.name))
+                {
+                    ui.add_space(8.0);
+                    ui.colored_label(
+                        notice_color(NoticeSeverity::Warning),
+                        "Controls target the current Windows default input.",
+                    );
                 }
             });
         });
@@ -881,6 +1045,16 @@ impl MicLiteApp {
                         {
                             self.save_lighting_to_microphone();
                         }
+                        if let Some(notice) = &self.lighting_notice {
+                            ui.add_space(6.0);
+                            ui.colored_label(notice_color(notice.severity), &notice.message);
+                        } else if self.lighting_device.is_none() {
+                            ui.add_space(6.0);
+                            ui.colored_label(
+                                notice_color(NoticeSeverity::Warning),
+                                "Lighting controls need the QuadCast S HID interface.",
+                            );
+                        }
                     });
                 });
             });
@@ -992,6 +1166,18 @@ impl MicLiteApp {
             );
         }
 
+        let mut notice_y = rect.top() + 42.0;
+        for notice in self.device_status_notices().into_iter().take(4) {
+            painter.text(
+                rect.left_top() + egui::vec2(16.0, notice_y - rect.top()),
+                egui::Align2::LEFT_TOP,
+                notice.message,
+                egui::FontId::proportional(12.0),
+                notice_color(notice.severity),
+            );
+            notice_y += 16.0;
+        }
+
         let pattern_rect = egui::Rect::from_min_max(
             egui::pos2(pattern_left, rect.top() + 16.0),
             egui::pos2(pattern_left + pattern_width, rect.bottom() - 16.0),
@@ -1021,6 +1207,20 @@ impl MicLiteApp {
         // stage that would push the audio/lighting panels down.
         let mut pattern_ui = ui.new_child(egui::UiBuilder::new().max_rect(pattern_rect));
         self.ui_pattern_panel(&mut pattern_ui);
+    }
+}
+
+fn is_expected_hyperx_device_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("hyperx") || name.contains("quadcast") || name.contains("kingston")
+}
+
+fn notice_color(severity: NoticeSeverity) -> egui::Color32 {
+    match severity {
+        NoticeSeverity::Good => egui::Color32::from_rgb(118, 220, 150),
+        NoticeSeverity::Info => egui::Color32::from_rgb(150, 190, 235),
+        NoticeSeverity::Warning => egui::Color32::from_rgb(255, 195, 95),
+        NoticeSeverity::Error => egui::Color32::from_rgb(255, 120, 120),
     }
 }
 
