@@ -30,7 +30,7 @@
 - Make the GUI more polished: spacing, typography, icons, better controls, empty/error states, and visual consistency.
 - Add a proper tray experience with mute state, current pattern, quick lighting presets, and open/exit actions.
 - Persist window size, selected tab, last colors, brightness, speed, and preferred defaults.
-- Add clearer device status indicators for disconnected, wrong device, unsupported feature, and write failure states.
+- [x] Add clearer device status indicators for disconnected, wrong device, unsupported feature, and write failure states.
 
 ## Lighting And Device Protocol
 
