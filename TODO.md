@@ -46,5 +46,5 @@
 - [x] Expand lighting packet rendering from 2 cells to the native 16-cell frame layout.
 - [x] Add an explicit, experimental `Save to Microphone` action for persistent device lighting writes.
 - [x] Capture and document live/muted lighting, save-solid, reset-default, and startup-only behavior.
-- Keep persistent device writes explicit; do not auto-save lighting or live/muted policy during normal Apply.
-- Do not implement reset-default until the command is isolated more safely.
+- [x] Keep persistent device writes explicit; do not auto-save lighting or live/muted policy during normal Apply.
+- [x] Do not implement reset-default until the command is isolated more safely.
