@@ -1,128 +1,128 @@
 # HyperX Mic Lite
 
-A lightweight Windows microphone controller intended to replace the parts of HyperX/NGENUITY-style software that matter for a USB mic.
+Lightweight Windows control software for the HyperX QuadCast S. It replaces the useful microphone, lighting, startup, diagnostics, service, and Home Assistant pieces without needing the full NGENUITY stack.
 
-Current scope:
+![HyperX Mic Lite GUI](assets/hyperx-mic-lite.png)
 
-- List Windows capture devices.
-- Show the default communications microphone.
-- Mute, unmute, or toggle mute.
-- Set default microphone input gain from `0` to `100`.
-- Native GUI with Audio and Lights tabs.
-- Detect the QuadCast S lighting HID controller.
+## Features
 
-The repo includes two implementations:
+- Native Windows GUI for audio, lighting, device status, tray behavior, config import/export, diagnostics, and MQTT settings.
+- Microphone mute/unmute/toggle and input volume control through Windows Core Audio.
+- QuadCast S USB Audio Class topology controls for mic volume, mic monitoring, headphone volume, and mute toggles.
+- Physical mute and polar-pattern HID event monitoring.
+- Lighting writer for Solid, Wave, Cycle, Pulse, Blink, Lightning, and VU Meter effects.
+- 16-cell lighting frame rendering, top/bottom/all targets, optional split-layer effects, and explicit `Save to Mic`.
+- VU Meter lighting using direct input capture with smoothed flame-style output.
+- Per-user GUI startup, close/minimize-to-tray behavior, and saved window position.
+- Structured app logs, panic reports, diagnostics bundle export, and Windows Event Viewer source registration.
+- Optional Windows service for boot-time audio restore and service health reporting.
+- Optional MQTT and Home Assistant MQTT discovery for read/write control.
 
-- `src/main.rs`: native Rust CLI.
-- `HyperXMicLite.ps1`: PowerShell fallback with a basic tray menu.
+## Supported Device
 
-## Run Now
+The app targets the HyperX QuadCast S lighting controller:
 
-Rust CLI:
+- USB VID: `0951`
+- USB PID: `171f`
 
-```powershell
-cargo run -- status
-cargo run -- list
-cargo run -- toggle
-cargo run -- volume 75
-cargo run -- lighting-detect
-cargo run -- gui
-```
+Audio controls use the current Windows default communications capture endpoint plus QuadCast S USB topology controls where available. If Windows points at the wrong default microphone, the GUI shows a warning.
 
-Configuration:
+## Quick Start
 
-```powershell
-cargo run -- config path
-cargo run -- config dump
-cargo run -- config export .\config-export.json
-cargo run -- config import .\config-export.json
-cargo run -- config validate
-cargo run -- config reset
-```
-
-Logs:
+Build the release binary:
 
 ```powershell
-cargo run -- logs path
-cargo run -- logs tail 80
+cargo build --release --locked
 ```
 
-PowerShell fallback:
+Run the GUI:
 
 ```powershell
-.\HyperXMicLite.ps1 list
-.\HyperXMicLite.ps1 status
-.\HyperXMicLite.ps1 toggle
-.\HyperXMicLite.ps1 volume 75
-.\HyperXMicLite.ps1 tray
+.\target\release\hyperx-mic-lite.exe
 ```
 
-## Build Native Rust Version
+Running with no arguments starts the GUI. If launched from a terminal, it also prints useful command examples.
 
-Install Rust with Rustup, then:
+## Useful CLI Commands
 
 ```powershell
-cargo build --release
+.\target\release\hyperx-mic-lite.exe help
+.\target\release\hyperx-mic-lite.exe status
+.\target\release\hyperx-mic-lite.exe list
+.\target\release\hyperx-mic-lite.exe mute
+.\target\release\hyperx-mic-lite.exe unmute
+.\target\release\hyperx-mic-lite.exe toggle
+.\target\release\hyperx-mic-lite.exe volume 75
 ```
 
-Use it:
+Lighting:
 
 ```powershell
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe list
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe status
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe toggle
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe volume 75
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-detect
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect cycle 10
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect vu_meter 10
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect vu_meter forever
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-vu-test 65 3
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe lighting-effect wave 5 --packet-log
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe gui
+.\target\release\hyperx-mic-lite.exe lighting-detect
+.\target\release\hyperx-mic-lite.exe lighting-hid-dump
+.\target\release\hyperx-mic-lite.exe hid-monitor 30
+.\target\release\hyperx-mic-lite.exe level-monitor 10
+.\target\release\hyperx-mic-lite.exe lighting-solid 00ff00 10
+.\target\release\hyperx-mic-lite.exe lighting-effect wave forever
+.\target\release\hyperx-mic-lite.exe lighting-effect vu_meter 30
+.\target\release\hyperx-mic-lite.exe lighting-save --packet-log
 ```
 
-Configuration:
+Config and logs:
 
 ```powershell
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe config path
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe config dump
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe config export .\config-export.json
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe config import .\config-export.json
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe config validate
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe config reset
+.\target\release\hyperx-mic-lite.exe config path
+.\target\release\hyperx-mic-lite.exe config dump
+.\target\release\hyperx-mic-lite.exe config export .\hyperx-config.json
+.\target\release\hyperx-mic-lite.exe config import .\hyperx-config.json
+.\target\release\hyperx-mic-lite.exe config validate
+.\target\release\hyperx-mic-lite.exe logs path
+.\target\release\hyperx-mic-lite.exe logs tail 100
 ```
 
-Logs:
+Diagnostics:
 
 ```powershell
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe logs path
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe logs tail 80
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe diagnostics export
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe eventlog status
+.\target\release\hyperx-mic-lite.exe diagnostics export
+.\target\release\hyperx-mic-lite.exe eventlog register
+.\target\release\hyperx-mic-lite.exe eventlog status
 ```
 
-Important lifecycle and failure events are also written to the Windows Application event log with provider `HyperXMicLite`. To make Event Viewer render friendly messages, register the source once from an elevated terminal:
+`eventlog register` should be run from an elevated terminal once if you want friendly Event Viewer messages. `service install` also registers the provider.
 
-```powershell
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe eventlog register
-```
+## GUI
 
-`service install` also registers this Event Viewer source automatically.
+The GUI is the normal way to use the app. It includes:
 
-Diagnostics export creates a folder containing a manifest, redacted config, recent app log, service health, Core Audio device/status JSON, and HID report-size details for supported lighting interfaces. Use `--packet-log` on lighting commands when protocol work needs packet-level HID write logs.
+- Audio controls and input level meter.
+- Lighting controls, targets, color swatches, split top/bottom effects, Apply, Stop Stream, and Save to Mic.
+- Physical polar-pattern display.
+- Device status warnings for missing lighting HID, wrong default microphone, unsupported input meter, and write failures.
+- Settings menu for tray behavior, mute-on-start, MQTT settings, config import/export, diagnostics export, and log tailing.
 
-MQTT and Home Assistant:
+Lighting streams run while the app is open. Persistent device writes are explicit: normal Apply does not write the preset into microphone memory; `Save to Mic` does.
 
-MQTT is disabled by default. Enable it in the JSON config from `config path`, then start the GUI. The broker URL supports old/simple and modern transports through the URL scheme:
+## MQTT And Home Assistant
+
+MQTT is optional and disabled by default. Configure it from the GUI settings menu or by editing the JSON config.
+
+Supported broker URL schemes:
+
+- `mqtt://` or `tcp://` for plain MQTT.
+- `mqtts://` or `ssl://` for TLS using system root certificates.
+- `ws://` for WebSocket.
+- `wss://` for secure WebSocket.
+
+Example config:
 
 ```json
 {
   "mqtt": {
     "enabled": true,
-    "url": "mqtt://homeassistant.local:1883",
+    "url": "mqtt://192.168.0.24:1883",
     "client_id": "hyperx-mic-lite",
-    "username": "mqtt-user",
-    "password": "mqtt-password",
+    "username": "hyperx-mic-lite",
+    "password": "hyperx-mic-lite",
     "base_topic": "hyperx_mic_lite/quadcast_s",
     "discovery_prefix": "homeassistant",
     "home_assistant_discovery": true,
@@ -134,38 +134,103 @@ MQTT is disabled by default. Enable it in the JSON config from `config path`, th
 }
 ```
 
-Supported URL schemes are `mqtt://` or `tcp://` for plain MQTT, `mqtts://` or `ssl://` for TLS using system roots, `ws://` for WebSocket, and `wss://` for secure WebSocket. Home Assistant discovery is published under `homeassistant/.../config` when enabled.
+State topics are published under:
 
-State topics live under `hyperx_mic_lite/quadcast_s/state/...`; command topics live under `hyperx_mic_lite/quadcast_s/command/...`. Writable command keys include `mute`, `mic_volume`, `mic_monitoring`, `headphone_volume`, `effect`, `target`, `brightness`, `speed`, `opacity`, `live_when_muted`, `apply`, `stop`, and `save`.
-
-Windows service:
-
-```powershell
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service install
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service start
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service status
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service plan
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service stop
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe service uninstall
+```text
+hyperx_mic_lite/quadcast_s/state/...
 ```
 
-Install/uninstall normally require an elevated terminal. The installed service auto-starts and currently restores configured microphone volume/mute state when `service.restore_on_startup` is enabled in the config. Windows services run in Session 0, so they do not show the GUI on your desktop. `service status` includes the Windows SCM state plus the app's last service health heartbeat when available.
+Command topics are subscribed under:
 
-Service ownership is intentionally narrow. The service owns boot-time restore, lifecycle/status, health heartbeat, and Event Viewer setup. The logged-in user session owns GUI rendering, per-user GUI startup, interactive lighting streams, and HID events used for UI refresh. Lighting loops, background HID policies, and tray handoff are left as explicit future candidates rather than hidden service behavior.
-
-Per-user GUI startup:
-
-```powershell
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup install
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup install --normal
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup status
-.\target\x86_64-pc-windows-gnu\release\hyperx-mic-lite.exe startup uninstall
+```text
+hyperx_mic_lite/quadcast_s/command/...
 ```
 
-The startup command does not require admin. It launches the GUI for the current Windows user at login. `startup install` starts minimized by default; use `--normal` to open the window normally. You can also launch manually with `gui --start-minimized`.
+Writable command keys:
 
-## Limits
+- `mute`
+- `mic_volume`
+- `mic_monitoring`
+- `headphone_volume`
+- `effect`
+- `target`
+- `brightness`
+- `speed`
+- `opacity`
+- `live_when_muted`
+- `apply`
+- `stop`
+- `save`
 
-Use the release binary for normal testing. The Lights tab detects the QuadCast S HID controller and can apply Solid, Wave, Cycle, Pulse, Blink, Lightning, and VU Meter effects through the packet writer. GUI lighting streams keep running while the app is open, and CLI effects run forever when `forever` is passed. VU Meter uses direct input capture with smoothed attack/release levels and flame-style colors, and the live-state option writes green/red lighting from HID mute reports.
+When Home Assistant discovery is enabled, the app publishes MQTT discovery entities for switches, number sliders, sensors, selects, and buttons.
 
-The Audio tab includes a persisted `Mute microphone when app starts` option.
+## Startup
+
+Per-user GUI startup does not need admin:
+
+```powershell
+.\target\release\hyperx-mic-lite.exe startup install
+.\target\release\hyperx-mic-lite.exe startup install --normal
+.\target\release\hyperx-mic-lite.exe startup status
+.\target\release\hyperx-mic-lite.exe startup uninstall
+```
+
+Default startup mode is minimized. Use `--normal` to open visibly at login.
+
+## Windows Service
+
+The service is intentionally narrow. It owns boot-time microphone restore, lifecycle/status, health heartbeat, and Event Viewer setup. The logged-in user session owns GUI rendering, tray behavior, interactive lighting streams, and HID events used by the UI.
+
+```powershell
+.\target\release\hyperx-mic-lite.exe service install
+.\target\release\hyperx-mic-lite.exe service start
+.\target\release\hyperx-mic-lite.exe service status
+.\target\release\hyperx-mic-lite.exe service plan
+.\target\release\hyperx-mic-lite.exe service stop
+.\target\release\hyperx-mic-lite.exe service uninstall
+```
+
+Install/uninstall normally require an elevated terminal. Windows services run in Session 0, so they do not show desktop UI.
+
+## Diagnostics And Logs
+
+The app writes structured JSONL logs under the user app data directory. Diagnostics export includes:
+
+- Manifest with app version and paths.
+- Redacted config.
+- Recent app log.
+- Service health JSON.
+- Core Audio device/status JSON.
+- HID report-size details for supported lighting interfaces.
+
+MQTT passwords, tokens, secrets, local paths, and device IDs are redacted in diagnostics exports.
+
+## Developer Notes
+
+The project is Windows-only.
+
+Recommended local toolchain:
+
+```powershell
+cargo fmt --all -- --check
+cargo check --all-targets --locked
+cargo test --all-targets --locked
+cargo build --release --locked
+```
+
+The build script embeds `resources/hyperx_messages.mc` when `windmc` and `windres` are available on PATH. If those tools are missing, the app still builds and Event Viewer falls back to registered provider records.
+
+## Release Process
+
+Use the `Release` GitHub Actions workflow. It accepts a semantic version, updates `Cargo.toml` and `Cargo.lock`, commits `Release vX.Y.Z`, tags `vX.Y.Z`, builds the Windows release binary, creates a zip package, generates a SHA-256 checksum file, uploads workflow artifacts, and publishes a GitHub Release.
+
+Release artifacts:
+
+- `hyperx-mic-lite-vX.Y.Z-windows-x86_64-msvc.zip`
+- `hyperx-mic-lite-vX.Y.Z-windows-x86_64-msvc.zip.sha256`
+
+The zip contains only `hyperx-mic-lite.exe`.
+
+## Protocol Notes
+
+The `captures/` directory documents USBPcap/Wireshark analysis for native lighting, audio slider, mode dial, save, reset-default, and startup-only behavior. Reset-default is intentionally documented but not implemented because the capture did not isolate a safe reset command.

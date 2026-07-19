@@ -11,26 +11,52 @@ fn main() {
     let windmc = env::var("WINDMC").unwrap_or_else(|_| "windmc".to_string());
     let windres = env::var("WINDRES").unwrap_or_else(|_| "windres".to_string());
 
-    let windmc_status = Command::new(&windmc)
+    let windmc_status = match Command::new(&windmc)
         .arg("-h")
         .arg(&out_dir)
         .arg("-r")
         .arg(&out_dir)
         .arg(&message_file)
         .status()
-        .expect("failed to run windmc; set WINDMC to the full windmc.exe path");
-    assert!(windmc_status.success(), "windmc failed");
+    {
+        Ok(status) => status,
+        Err(error) => {
+            println!(
+                "cargo:warning=skipping Event Viewer message resource: failed to run {windmc}: {error}"
+            );
+            return;
+        }
+    };
+    if !windmc_status.success() {
+        println!(
+            "cargo:warning=skipping Event Viewer message resource: {windmc} exited with {windmc_status}"
+        );
+        return;
+    }
 
     let resource_script = out_dir.join("hyperx_messages.rc");
     let resource_object = out_dir.join("hyperx_messages.o");
-    let windres_status = Command::new(&windres)
+    let windres_status = match Command::new(&windres)
         .arg("-i")
         .arg(&resource_script)
         .arg("-o")
         .arg(&resource_object)
         .status()
-        .expect("failed to run windres; set WINDRES to the full windres.exe path");
-    assert!(windres_status.success(), "windres failed");
+    {
+        Ok(status) => status,
+        Err(error) => {
+            println!(
+                "cargo:warning=skipping Event Viewer message resource: failed to run {windres}: {error}"
+            );
+            return;
+        }
+    };
+    if !windres_status.success() {
+        println!(
+            "cargo:warning=skipping Event Viewer message resource: {windres} exited with {windres_status}"
+        );
+        return;
+    }
 
     println!("cargo:rustc-link-arg={}", resource_object.display());
 }
