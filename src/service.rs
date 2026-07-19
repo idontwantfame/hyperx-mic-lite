@@ -240,13 +240,13 @@ pub(crate) fn run_service_worker_console() -> Result<(), String> {
     health.restore_on_startup = load_or_create_config()
         .map(|config| config.service.restore_on_startup)
         .unwrap_or(false);
-    let _ = write_service_health(&health);
+    persist_service_health(&health);
     log_event("info", "service.console.running", &[]);
     loop {
         thread::sleep(Duration::from_secs(5));
         health.heartbeat_count += 1;
         health.updated_at = log_timestamp();
-        let _ = write_service_health(&health);
+        persist_service_health(&health);
         log_event(
             "info",
             "service.console.heartbeat",
@@ -280,7 +280,7 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
     health.restore_on_startup = load_or_create_config()
         .map(|config| config.service.restore_on_startup)
         .unwrap_or(false);
-    let _ = write_service_health(&health);
+    persist_service_health(&health);
 
     if let Err(error) = restore_service_settings() {
         health.last_error = Some(error.to_string());
@@ -301,7 +301,7 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
     )?;
     health.state = "running".to_string();
     health.updated_at = log_timestamp();
-    let _ = write_service_health(&health);
+    persist_service_health(&health);
     log_event("info", "service.running", &[]);
 
     loop {
@@ -310,7 +310,7 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 health.heartbeat_count += 1;
                 health.updated_at = log_timestamp();
-                let _ = write_service_health(&health);
+                persist_service_health(&health);
                 log_event(
                     "info",
                     "service.heartbeat",
@@ -328,7 +328,7 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
     )?;
     health.state = "stop_pending".to_string();
     health.updated_at = log_timestamp();
-    let _ = write_service_health(&health);
+    persist_service_health(&health);
     log_event("info", "service.stopping", &[]);
     set_service_status(
         &status_handle,
@@ -338,7 +338,7 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
     )?;
     health.state = "stopped".to_string();
     health.updated_at = log_timestamp();
-    let _ = write_service_health(&health);
+    persist_service_health(&health);
     log_event("info", "service.stopped", &[]);
     Ok(())
 }
@@ -415,6 +415,13 @@ fn write_service_health(health: &ServiceHealth) -> Result<(), String> {
     }
     let text = serde_json::to_string_pretty(health).map_err(|error| error.to_string())?;
     fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+// Health snapshots are best effort, but a failing write should still leave a trace.
+fn persist_service_health(health: &ServiceHealth) {
+    if let Err(error) = write_service_health(health) {
+        log_event("warn", "service.health.write.error", &[("message", error)]);
+    }
 }
 
 fn service_state_label(state: ServiceState) -> &'static str {

@@ -102,6 +102,8 @@ pub(crate) struct MicLiteApp {
     window_x: Option<f32>,
     window_y: Option<f32>,
     last_window_position_save: Instant,
+    device_notices: Vec<UiNotice>,
+    device_notices_key: u64,
 }
 
 impl MicLiteApp {
@@ -200,6 +202,8 @@ impl MicLiteApp {
             window_x: config.ui.window_x,
             window_y: config.ui.window_y,
             last_window_position_save: Instant::now(),
+            device_notices: Vec::new(),
+            device_notices_key: 0,
         };
         app.refresh_status();
         if app.mute_on_app_start {
@@ -1114,6 +1118,29 @@ impl MicLiteApp {
         });
     }
 
+    // Cheap change detector so the notices (and their Strings) are only rebuilt
+    // when the underlying device state changes, not on every repaint.
+    fn device_status_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.status
+            .as_ref()
+            .map(|status| (&status.device.state, &status.device.name))
+            .hash(&mut hasher);
+        self.status_error.hash(&mut hasher);
+        self.lighting_device.is_none().hash(&mut hasher);
+        self.input_monitor.is_none().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn refresh_device_notices(&mut self) {
+        let key = self.device_status_fingerprint();
+        if self.device_notices.is_empty() || key != self.device_notices_key {
+            self.device_notices = self.device_status_notices();
+            self.device_notices_key = key;
+        }
+    }
+
     fn device_status_notices(&self) -> Vec<UiNotice> {
         let mut notices = Vec::new();
         match (&self.status, &self.status_error) {
@@ -1509,11 +1536,12 @@ impl MicLiteApp {
         }
 
         let mut notice_y = rect.top() + 42.0;
-        for notice in self.device_status_notices().into_iter().take(4) {
+        self.refresh_device_notices();
+        for notice in self.device_notices.iter().take(4) {
             painter.text(
                 rect.left_top() + egui::vec2(16.0, notice_y - rect.top()),
                 egui::Align2::LEFT_TOP,
-                notice.message,
+                &notice.message,
                 egui::FontId::proportional(12.0),
                 notice_color(notice.severity),
             );
@@ -1627,7 +1655,14 @@ impl eframe::App for MicLiteApp {
             self.start_minimized_applied = true;
             log_event("info", "gui.start_minimized", &[]);
         }
-        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        // Tick slower while hidden in the tray: only tray/MQTT/HID plumbing needs
+        // servicing there, and 4 Hz keeps those responsive at a fraction of the CPU.
+        let repaint_delay = if self.hidden_to_tray {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(50)
+        };
+        ui.ctx().request_repaint_after(repaint_delay);
         let inner_width = (ui.available_width() - 20.0).max(0.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
