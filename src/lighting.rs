@@ -704,7 +704,10 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
                                 "hid.listener.event.mute",
                                 &[("live", is_live.to_string())],
                             );
-                            let _ = sender.send(HidEvent::Mute(is_live));
+                            if sender.send(HidEvent::Mute(is_live)).is_err() {
+                                log_event("info", "hid.listener.stop", &[]);
+                                return;
+                            }
                         }
                         Some(HidEvent::Pattern(pattern)) => {
                             log_event(
@@ -712,7 +715,10 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
                                 "hid.listener.event.pattern",
                                 &[("pattern", pattern.label().to_string())],
                             );
-                            let _ = sender.send(HidEvent::Pattern(pattern));
+                            if sender.send(HidEvent::Pattern(pattern)).is_err() {
+                                log_event("info", "hid.listener.stop", &[]);
+                                return;
+                            }
                         }
                         None => {}
                     },
@@ -906,7 +912,9 @@ pub(crate) fn stream_lighting_program_cancelable(
             } else {
                 0.0
             };
-            let endpoint_peak = if program.shared_peak_bits.is_none() {
+            // The per-frame endpoint meter query is expensive (fresh COM objects
+            // each call); only fall back to it when no direct capture is available.
+            let endpoint_peak = if program.shared_peak_bits.is_none() && capture_monitor.is_none() {
                 match input_peak_value() {
                     Ok(peak) => peak,
                     Err(error) => {

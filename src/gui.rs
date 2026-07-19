@@ -651,10 +651,7 @@ impl MicLiteApp {
             ],
         );
 
-        if let Some(cancel) = &self.lighting_cancel {
-            cancel.store(true, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(90));
-        }
+        let previous_cancel = self.lighting_cancel.take();
         let cancel = Arc::new(AtomicBool::new(false));
         self.lighting_cancel = Some(cancel.clone());
         self.lighting_notice = Some(UiNotice {
@@ -664,6 +661,12 @@ impl MicLiteApp {
         let sender = self.lighting_event_sender.clone();
 
         thread::spawn(move || {
+            // Hand off from the previous stream inside the worker so the UI
+            // thread never blocks on the cancellation grace period.
+            if let Some(previous) = previous_cancel {
+                previous.store(true, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(90));
+            }
             match stream_lighting_program_cancelable(
                 &program,
                 StreamDuration::Forever,

@@ -182,6 +182,8 @@ fn redact_json_value(value: serde_json::Value) -> serde_json::Value {
                         || lower.contains("secret")
                     {
                         (key, serde_json::Value::String("<redacted>".to_string()))
+                    } else if lower.ends_with("url") {
+                        (key, redact_url_value(value))
                     } else {
                         (key, redact_json_value(value))
                     }
@@ -192,5 +194,23 @@ fn redact_json_value(value: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(values.into_iter().map(redact_json_value).collect())
         }
         other => other,
+    }
+}
+
+fn redact_url_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(url) => serde_json::Value::String(redact_url_credentials(&url)),
+        other => redact_json_value(other),
+    }
+}
+
+// Broker URLs may embed credentials (scheme://user:pass@host); strip the
+// userinfo part so diagnostics bundles are safe to share.
+fn redact_url_credentials(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme_end), Some(at)) if at > scheme_end => {
+            format!("{}<redacted>@{}", &url[..scheme_end + 3], &url[at + 1..])
+        }
+        _ => url.to_string(),
     }
 }
