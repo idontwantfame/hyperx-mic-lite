@@ -20,6 +20,7 @@ use windows::{
         System::{
             Com::StructuredStorage::PropVariantClear,
             Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ},
+            Variant::VT_LPWSTR,
         },
     },
     core::{Error, HRESULT, Interface, Result as WinResult, Type},
@@ -271,10 +272,19 @@ pub(crate) fn set_audio_control_volume(control: AudioClassControl, percent: u8) 
         AudioClassControl::Mic => set_mic_volume_percent(percent),
         AudioClassControl::Monitoring => set_topology_control_volume(control, percent),
         AudioClassControl::Headphone => {
+            // Best effort: an endpoint failure must not skip the topology write below.
             if let Ok(device) = hyperx_render_device() {
-                unsafe {
-                    endpoint_volume(&device)?
-                        .SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())?;
+                let endpoint_result = unsafe {
+                    endpoint_volume(&device).and_then(|volume| {
+                        volume.SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())
+                    })
+                };
+                if let Err(error) = endpoint_result {
+                    log_event(
+                        "warn",
+                        "audio.usb_class.volume.endpoint_error",
+                        &[("message", error.to_string())],
+                    );
                 }
             }
             set_topology_control_volume(control, percent)
@@ -768,14 +778,20 @@ fn describe_device(device: &IMMDevice) -> WinResult<DeviceInfo> {
 fn device_name(device: &IMMDevice) -> WinResult<String> {
     let store = unsafe { device.OpenPropertyStore(STGM_READ)? };
     let mut value = unsafe { store.GetValue(&PKEY_Device_FriendlyName)? };
+    // PROPVARIANT is a tagged union; pwszVal is only valid when vt is VT_LPWSTR
+    // (a device may report the property as VT_EMPTY or another type).
     let name = unsafe {
-        value
-            .Anonymous
-            .Anonymous
-            .Anonymous
-            .pwszVal
-            .to_string()
-            .unwrap_or_default()
+        if value.Anonymous.Anonymous.vt == VT_LPWSTR {
+            value
+                .Anonymous
+                .Anonymous
+                .Anonymous
+                .pwszVal
+                .to_string()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
     };
     unsafe { PropVariantClear(&mut value)? };
 
