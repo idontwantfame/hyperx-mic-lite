@@ -1,7 +1,19 @@
-use std::{env, io::IsTerminal, process};
+use std::{env, process};
 
 use eframe::egui;
-use windows::core::Result as WinResult;
+use windows::{
+    Win32::{
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
+        System::Console::{
+            ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleProcessList, STD_ERROR_HANDLE,
+            STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        },
+    },
+    core::{Result as WinResult, w},
+};
 
 use crate::{
     audio::{
@@ -24,13 +36,14 @@ use crate::{
     startup::run_startup_command,
 };
 pub fn run_app() {
+    let launched_from_terminal = attach_parent_console();
     install_panic_hook();
     log_event(
         "info",
         "app.start",
         &[("args", env::args().skip(1).collect::<Vec<_>>().join(" "))],
     );
-    if let Err(error) = run() {
+    if let Err(error) = run(launched_from_terminal) {
         log_event("error", "app.error", &[("message", error.to_string())]);
         eprintln!("{error}");
         process::exit(1);
@@ -38,10 +51,10 @@ pub fn run_app() {
     log_event("info", "app.exit", &[]);
 }
 
-fn run() -> WinResult<()> {
+fn run(launched_from_terminal: bool) -> WinResult<()> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        if running_from_terminal() {
+        if launched_from_terminal {
             startup_info();
         }
         let _com = ComApartment::init()?;
@@ -100,8 +113,48 @@ fn run() -> WinResult<()> {
     Ok(())
 }
 
-fn running_from_terminal() -> bool {
-    std::io::stdout().is_terminal() || std::io::stderr().is_terminal()
+fn attach_parent_console() -> bool {
+    let attached =
+        (unsafe { AttachConsole(ATTACH_PARENT_PROCESS).is_ok() }) || attached_to_existing_console();
+    if attached {
+        redirect_stdio_to_console();
+    }
+    attached
+}
+
+fn attached_to_existing_console() -> bool {
+    let mut processes = [0u32; 8];
+    let count = unsafe { GetConsoleProcessList(&mut processes) };
+    count > 1
+}
+
+fn redirect_stdio_to_console() {
+    unsafe {
+        if let Ok(output) = CreateFileW(
+            w!("CONOUT$"),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, output);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, output);
+        }
+
+        if let Ok(input) = CreateFileW(
+            w!("CONIN$"),
+            FILE_GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        ) {
+            let _ = SetStdHandle(STD_INPUT_HANDLE, input);
+        }
+    }
 }
 
 fn startup_info() {
