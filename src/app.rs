@@ -1,7 +1,7 @@
 use std::{env, io::IsTerminal, process};
 
 use eframe::egui;
-use windows::core::Result as WinResult;
+use windows::{Win32::System::Console::GetConsoleProcessList, core::Result as WinResult};
 
 use crate::{
     audio::{
@@ -101,7 +101,14 @@ fn run() -> WinResult<()> {
 }
 
 fn running_from_terminal() -> bool {
-    std::io::stdout().is_terminal() || std::io::stderr().is_terminal()
+    (std::io::stdout().is_terminal() || std::io::stderr().is_terminal())
+        && attached_to_existing_console()
+}
+
+fn attached_to_existing_console() -> bool {
+    let mut processes = [0u32; 8];
+    let count = unsafe { GetConsoleProcessList(&mut processes) };
+    count > 1
 }
 
 fn startup_info() {
