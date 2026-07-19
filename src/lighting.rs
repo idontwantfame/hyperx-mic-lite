@@ -148,6 +148,8 @@ pub(crate) fn print_lighting_hid_dump() {
 pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
     let path = path.to_string_lossy();
     let wide_path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
+    // SAFETY: wide_path is a null-terminated UTF-16 buffer that outlives the call; access mask 0
+    // with OPEN_EXISTING is valid for opening a HID device just to query its capabilities.
     let handle = unsafe {
         CreateFileW(
             PCWSTR(wide_path.as_ptr()),
@@ -162,6 +164,9 @@ pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
     .map_err(|error| error.to_string())?;
 
     let mut preparsed: PHIDP_PREPARSED_DATA = PHIDP_PREPARSED_DATA::default();
+    // SAFETY: handle is the valid HID device handle opened above; preparsed is only used after
+    // HidD_GetPreparsedData returns TRUE and is freed exactly once, HidP_GetCaps writes only to
+    // the local HIDP_CAPS out-param, and handle is closed on both the error and success paths.
     let result = unsafe {
         if !HidD_GetPreparsedData(handle, &mut preparsed) {
             let _ = CloseHandle(handle);
