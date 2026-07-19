@@ -472,8 +472,11 @@ pub(crate) fn save_config(config: &AppConfig) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
-    fs::write(&path, format!("{text}\n"))
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    // Write to a temp file and rename so a crash mid-write cannot truncate config.json.
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, format!("{text}\n"))
+        .map_err(|error| format!("{}: {error}", temp_path.display()))?;
+    fs::rename(&temp_path, &path).map_err(|error| format!("{}: {error}", path.display()))?;
     log_event(
         "info",
         "config.save",

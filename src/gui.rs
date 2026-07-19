@@ -106,7 +106,10 @@ pub(crate) struct MicLiteApp {
 
 impl MicLiteApp {
     pub(crate) fn new(start_minimized: bool, layout_edit: bool) -> Self {
-        let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
+        let config = load_or_create_config().unwrap_or_else(|error| {
+            log_event("error", "config.load.error", &[("message", error)]);
+            AppConfig::default()
+        });
         let (lighting_event_sender, lighting_events) = mpsc::channel();
         let colors = config
             .lighting
@@ -210,10 +213,16 @@ impl MicLiteApp {
 
     fn save_config_snapshot(&self) {
         let config = self.current_config_snapshot();
-        let _ = save_config(&config);
+        if let Err(error) = save_config(&config) {
+            log_event("error", "config.save.error", &[("message", error)]);
+        }
     }
 
     fn current_config_snapshot(&self) -> AppConfig {
+        // Service/device settings are edited outside the GUI (e.g. the `service`
+        // CLI), so read the file once here to carry them over instead of caching
+        // stale values from startup.
+        let stored = load_or_create_config().unwrap_or_default();
         AppConfig {
             schema_version: CONFIG_SCHEMA_VERSION,
             audio: AudioConfig {
@@ -256,12 +265,8 @@ impl MicLiteApp {
                 dashboard_lighting_width: self.dashboard_lighting_width,
                 dashboard_column_gap: self.dashboard_column_gap,
             },
-            service: load_or_create_config()
-                .map(|config| config.service)
-                .unwrap_or_else(|_| AppConfig::default().service),
-            device: load_or_create_config()
-                .map(|config| config.device)
-                .unwrap_or_else(|_| AppConfig::default().device),
+            service: stored.service,
+            device: stored.device,
             mqtt: self.mqtt_config.clone(),
         }
     }
