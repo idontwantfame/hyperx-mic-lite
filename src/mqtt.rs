@@ -123,7 +123,13 @@ pub(crate) fn start_mqtt_runtime(config: &MqttConfig) -> Option<MqttRuntime> {
         if discovery_enabled {
             publish_discovery(&client, &topics, qos);
         }
-        let _ = client.publish(topics.availability(), qos, true, "online");
+        if let Err(error) = client.publish(topics.availability(), qos, true, "online") {
+            log_event(
+                "warn",
+                "mqtt.publish.error",
+                &[("message", error.to_string())],
+            );
+        }
         log_event(
             "info",
             "mqtt.connected",
