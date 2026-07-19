@@ -65,6 +65,8 @@ fn copy_wide_into<const N: usize>(target: &mut [u16; N], value: &str) {
 }
 
 fn run_tray_message_loop() -> Result<(), String> {
+    // SAFETY: only registered as lpfnWndProc below; the OS invokes it on the thread that
+    // created the window with a valid HWND and the raw message arguments it dispatched.
     unsafe extern "system" fn tray_window_proc(
         hwnd: HWND,
         message: u32,
@@ -93,15 +95,21 @@ fn run_tray_message_loop() -> Result<(), String> {
             }
             WM_CLOSE | WM_DESTROY => {
                 remove_tray_icon(hwnd);
+                // SAFETY: PostQuitMessage takes no pointers and runs on the thread that owns
+                // this window's message loop (the window proc is invoked on that thread).
                 unsafe {
                     PostQuitMessage(0);
                 }
                 LRESULT(0)
             }
+            // SAFETY: forwards the OS-supplied hwnd/message/wparam/lparam unchanged to the
+            // default window procedure.
             _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
     }
 
+    // SAFETY: GetModuleHandleW(None) passes a null module name, which is explicitly allowed
+    // and returns the handle of the current process image.
     let instance = unsafe { GetModuleHandleW(None).map_err(|error| error.to_string())? };
     let class_name = wide_null("HyperXMicLiteTrayWindow");
     let window_name = wide_null("HyperX Mic Lite Tray");
@@ -111,11 +119,15 @@ fn run_tray_message_loop() -> Result<(), String> {
         lpszClassName: PCWSTR(class_name.as_ptr()),
         ..Default::default()
     };
+    // SAFETY: window_class points at class_name, a live null-terminated UTF-16 buffer, and
+    // lpfnWndProc is Some(tray_window_proc); RegisterClassW copies the data it needs.
     let atom = unsafe { RegisterClassW(&window_class) };
     if atom == 0 {
         return Err("RegisterClassW failed for tray window.".to_string());
     }
 
+    // SAFETY: class_name and window_name are null-terminated UTF-16 buffers that outlive the
+    // call, and the class named by class_name was registered above with a valid window proc.
     let hwnd = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -138,7 +150,10 @@ fn run_tray_message_loop() -> Result<(), String> {
     log_event("info", "tray.start", &[]);
 
     let mut message = MSG::default();
+    // SAFETY: message is a valid MSG out-param owned by this frame; a None HWND filter is
+    // explicitly allowed and retrieves messages for any window on this thread.
     while unsafe { GetMessageW(&mut message, None, 0, 0).into() } {
+        // SAFETY: message was just filled in by the successful GetMessageW call above.
         unsafe {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -197,6 +212,8 @@ fn create_app_icon() -> Option<HICON> {
         }
     }
 
+    // SAFETY: and (1bpp mask, SIZE/8 bytes per row) and xor (32bpp BGRA) are sized exactly for
+    // the 32x32, 1-plane, 32-bits-per-pixel icon requested, and both buffers outlive the call.
     unsafe {
         CreateIcon(
             None,
@@ -214,6 +231,8 @@ fn create_app_icon() -> Option<HICON> {
 fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
     let icon = match create_app_icon() {
         Some(icon) => icon,
+        // SAFETY: a None instance with IDI_APPLICATION loads the predefined system icon; no
+        // caller-owned pointers are passed.
         None => unsafe { LoadIconW(None, IDI_APPLICATION).map_err(|error| error.to_string())? },
     };
     let mut data = NOTIFYICONDATAW {
@@ -226,6 +245,8 @@ fn add_tray_icon(hwnd: HWND) -> Result<(), String> {
         ..Default::default()
     };
     copy_wide_into(&mut data.szTip, "HyperX Mic Lite");
+    // SAFETY: data is a fully initialized NOTIFYICONDATAW with cbSize set to the struct size;
+    // the tip text lives in the in-struct szTip array, so no external pointers are involved.
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() };
     if ok {
         Ok(())
@@ -241,12 +262,17 @@ fn remove_tray_icon(hwnd: HWND) {
         uID: TRAY_UID,
         ..Default::default()
     };
+    // SAFETY: data has cbSize set and identifies the icon by hWnd/uID, the only fields
+    // NIM_DELETE reads; no external pointers are involved.
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &data);
     }
 }
 
 fn show_tray_menu(hwnd: HWND) {
+    // SAFETY: the menu handle is checked for validity before use and destroyed before return;
+    // open/exit are null-terminated UTF-16 buffers outliving AppendMenuW; hwnd comes from the
+    // window proc, and GetCursorPos writes only to the local POINT out-param.
     unsafe {
         let Ok(menu) = CreatePopupMenu() else {
             return;

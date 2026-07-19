@@ -108,6 +108,9 @@ fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
     let wide_message = message.encode_utf16().chain([0]).collect::<Vec<_>>();
     let strings = [PCWSTR(wide_message.as_ptr())];
 
+    // SAFETY: the source name is a static null-terminated wide literal; strings points at
+    // wide_message, a null-terminated UTF-16 buffer that outlives ReportEventW, and the
+    // handle returned by RegisterEventSourceW is deregistered exactly once before leaving.
     unsafe {
         if let Ok(handle) = RegisterEventSourceW(None, w!("HyperXMicLite")) {
             let _ = ReportEventW(

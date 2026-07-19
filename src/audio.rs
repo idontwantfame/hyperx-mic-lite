@@ -228,6 +228,8 @@ impl AudioClassControl {
 }
 
 pub(crate) fn set_mic_mute(muted: bool) -> WinResult<()> {
+    // SAFETY: the IAudioEndpointVolume comes from Activate on a live device; SetMute
+    // documents the event-context GUID pointer as optional, so null is allowed.
     let result =
         unsafe { endpoint_volume(&default_capture_device()?)?.SetMute(muted, std::ptr::null()) };
     if result.is_ok() {
@@ -238,12 +240,17 @@ pub(crate) fn set_mic_mute(muted: bool) -> WinResult<()> {
 
 pub(crate) fn toggle_mic_mute() -> WinResult<()> {
     let volume = endpoint_volume(&default_capture_device()?)?;
+    // SAFETY: volume is a live IAudioEndpointVolume obtained above; GetMute only writes
+    // its BOOL out-param.
     let muted = unsafe { volume.GetMute()?.as_bool() };
+    // SAFETY: same live interface pointer; SetMute allows a null event-context GUID.
     unsafe { volume.SetMute(!muted, std::ptr::null())? };
     Ok(())
 }
 
 pub(crate) fn set_mic_volume_percent(percent: u8) -> WinResult<()> {
+    // SAFETY: the IAudioEndpointVolume comes from Activate on a live device;
+    // SetMasterVolumeLevelScalar allows a null event-context GUID.
     let result = unsafe {
         endpoint_volume(&default_capture_device()?)?
             .SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())
@@ -274,6 +281,8 @@ pub(crate) fn set_audio_control_volume(control: AudioClassControl, percent: u8) 
         AudioClassControl::Headphone => {
             // Best effort: an endpoint failure must not skip the topology write below.
             if let Ok(device) = hyperx_render_device() {
+                // SAFETY: device is a valid IMMDevice; the activated IAudioEndpointVolume is
+                // used within the closure, and a null event-context GUID is allowed.
                 let endpoint_result = unsafe {
                     endpoint_volume(&device).and_then(|volume| {
                         volume.SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())
@@ -321,8 +330,11 @@ fn set_audio_control_mute(control: AudioClassControl, muted: bool) -> WinResult<
 
 fn set_topology_control_volume(control: AudioClassControl, percent: u8) -> WinResult<()> {
     let device = hyperx_audio_device(control.endpoint_flow())?;
+    // SAFETY: device is a valid IMMDevice; Activate with no activation params is valid for
+    // IDeviceTopology and returns an owned interface on success.
     let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None)? };
     let part = find_topology_part(&topology, control.volume_part_id())?
+        // SAFETY: topology is a live IDeviceTopology; GetPartById returns an owned IPart.
         .or_else(|| unsafe { topology.GetPartById(control.volume_part_id()).ok() })
         .ok_or_else(|| {
             Error::new(
@@ -333,6 +345,9 @@ fn set_topology_control_volume(control: AudioClassControl, percent: u8) -> WinRe
     let volume = activate_part_interface::<IAudioVolumeLevel>(&part)?;
     let (captured_min, captured_max) = control.db_range();
     let mut target = captured_min + (captured_max - captured_min) * percent as f32 / 100.0;
+    // SAFETY: volume is the IAudioVolumeLevel activated above for this part; GetLevelRange
+    // writes only to the three local f32 out-params, and SetLevel is called with channel
+    // indices below the count reported by GetChannelCount on the same interface.
     unsafe {
         let channels = volume.GetChannelCount().unwrap_or(2).max(1);
         let mut min = 0.0f32;
@@ -353,8 +368,11 @@ fn set_topology_control_volume(control: AudioClassControl, percent: u8) -> WinRe
 
 fn set_topology_control_mute(control: AudioClassControl, muted: bool) -> WinResult<()> {
     let device = hyperx_audio_device(control.endpoint_flow())?;
+    // SAFETY: device is a valid IMMDevice; Activate with no activation params is valid for
+    // IDeviceTopology and returns an owned interface on success.
     let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None)? };
     let part = find_topology_part(&topology, control.mute_part_id())?
+        // SAFETY: topology is a live IDeviceTopology; GetPartById returns an owned IPart.
         .or_else(|| unsafe { topology.GetPartById(control.mute_part_id()).ok() })
         .ok_or_else(|| {
             Error::new(
@@ -363,6 +381,8 @@ fn set_topology_control_mute(control: AudioClassControl, muted: bool) -> WinResu
             )
         })?;
     let mute = activate_part_interface::<IAudioMute>(&part)?;
+    // SAFETY: mute is the IAudioMute activated above for this part; the event-context
+    // argument is optional and None is allowed.
     unsafe { mute.SetMute(muted, None) }
 }
 
@@ -370,6 +390,8 @@ fn activate_part_interface<T: Interface>(
     part: &windows::Win32::Media::Audio::IPart,
 ) -> WinResult<T> {
     let mut raw = std::ptr::null_mut();
+    // SAFETY: part is a valid IPart; on success Activate writes an owned pointer implementing
+    // T::IID into raw, and Type::from_abi takes ownership of exactly that pointer.
     unsafe {
         part.Activate(CLSCTX_ALL.0 as u32, &T::IID, Some(&mut raw))?;
         Type::from_abi(raw)
@@ -382,10 +404,14 @@ fn hyperx_render_device() -> WinResult<IMMDevice> {
 
 fn hyperx_audio_device(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<IMMDevice> {
     let enumerator = device_enumerator()?;
+    // SAFETY: enumerator is a valid IMMDeviceEnumerator created just above; the returned
+    // collection is an owned IMMDeviceCollection.
     let collection =
         unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE(DEVICE_STATEMASK_ALL))? };
+    // SAFETY: collection is the live IMMDeviceCollection obtained above.
     let count = unsafe { collection.GetCount()? };
     for index in 0..count {
+        // SAFETY: index < count reported by GetCount on this same collection.
         let device = unsafe { collection.Item(index)? };
         let name = device_name(&device)
             .unwrap_or_default()
@@ -394,15 +420,22 @@ fn hyperx_audio_device(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResu
             return Ok(device);
         }
     }
+    // SAFETY: enumerator is still the valid IMMDeviceEnumerator created above; the method
+    // returns an owned IMMDevice on success.
     unsafe { enumerator.GetDefaultAudioEndpoint(flow, eCommunications) }
 }
 
 fn print_audio_topology(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<()> {
     let device = hyperx_audio_device(flow)?;
+    // SAFETY: device is a valid IMMDevice; Activate with no activation params is valid for
+    // IDeviceTopology and returns an owned interface on success.
     let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None)? };
     let device_name = device_name(&device).unwrap_or_else(|_| "Unknown".to_string());
     println!("Topology for {device_name}");
     let mut visited = Vec::new();
+    // SAFETY: topology is a live IDeviceTopology; every subunit, connector, and part used in
+    // this block is an owned COM interface it returned, and indices stay below the counts
+    // reported by GetSubunitCount/GetConnectorCount on the same object.
     unsafe {
         let subunit_count = topology.GetSubunitCount()?;
         for index in 0..subunit_count {
@@ -429,6 +462,9 @@ fn find_topology_part(
     id: u32,
 ) -> WinResult<Option<windows::Win32::Media::Audio::IPart>> {
     let mut visited = Vec::new();
+    // SAFETY: topology is a live IDeviceTopology borrowed from the caller; every subunit,
+    // connector, and part used here is an owned COM interface it returned, and indices stay
+    // below the counts reported by GetSubunitCount/GetConnectorCount on the same object.
     unsafe {
         let subunit_count = topology.GetSubunitCount()?;
         for index in 0..subunit_count {
@@ -459,6 +495,8 @@ fn find_topology_part_from(
     id: u32,
     visited: &mut Vec<u32>,
 ) -> WinResult<Option<windows::Win32::Media::Audio::IPart>> {
+    // SAFETY: part is a valid IPart borrowed from the caller; the parts lists and children it
+    // returns are owned COM interfaces, and GetPart is only called with index < GetCount().
     unsafe {
         let local_id = part.GetLocalId()?;
         if local_id == id {
@@ -497,6 +535,9 @@ fn print_topology_part(
     depth: usize,
     visited: &mut Vec<u32>,
 ) -> WinResult<()> {
+    // SAFETY: part is a valid IPart borrowed from the caller; controls, part lists, and
+    // children are owned COM interfaces it returned, and every index stays below the
+    // corresponding GetControlInterfaceCount/GetCount value from the same object.
     unsafe {
         let id = part.GetLocalId()?;
         if visited.contains(&id) {
@@ -546,6 +587,8 @@ fn print_topology_part(
 pub(crate) fn input_peak_value() -> WinResult<f32> {
     let device = default_capture_device()?;
     let meter = endpoint_meter(&device)?;
+    // SAFETY: meter is a live IAudioMeterInformation activated for the default capture
+    // device; GetPeakValue only writes its f32 out-param.
     unsafe { meter.GetPeakValue() }
 }
 
@@ -710,7 +753,10 @@ pub(crate) fn mic_status() -> WinResult<MicStatus> {
     info.is_default = true;
 
     let volume = endpoint_volume(&device)?;
+    // SAFETY: volume is a live IAudioEndpointVolume obtained above; the getter only writes
+    // its f32 out-param.
     let scalar = unsafe { volume.GetMasterVolumeLevelScalar()? };
+    // SAFETY: same live interface pointer; GetMute only writes its BOOL out-param.
     let muted = unsafe { volume.GetMute()?.as_bool() };
 
     Ok(MicStatus {
@@ -723,17 +769,23 @@ pub(crate) fn mic_status() -> WinResult<MicStatus> {
 pub(crate) fn list_capture_devices() -> WinResult<Vec<DeviceInfo>> {
     let enumerator = device_enumerator()?;
     let default_id = default_capture_device_with(&enumerator)
+        // SAFETY: device is a valid IMMDevice; GetId returns an owned, null-terminated PWSTR.
         .and_then(|device| unsafe { device.GetId() })
+        // SAFETY: id is the null-terminated PWSTR returned by GetId above, read immediately.
         .map(|id| unsafe { id.to_string().unwrap_or_default() })
         .unwrap_or_default();
 
+    // SAFETY: enumerator is a valid IMMDeviceEnumerator created above; the returned
+    // collection is an owned IMMDeviceCollection.
     let collection =
         unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE(DEVICE_STATEMASK_ALL))? };
 
+    // SAFETY: collection is the live IMMDeviceCollection obtained above.
     let count = unsafe { collection.GetCount()? };
     let mut devices = Vec::with_capacity(count as usize);
 
     for index in 0..count {
+        // SAFETY: index < count reported by GetCount on this same collection.
         let device = unsafe { collection.Item(index)? };
         let mut info = describe_device(&device)?;
         info.is_default = info.id == default_id;
@@ -748,23 +800,34 @@ fn default_capture_device() -> WinResult<IMMDevice> {
 }
 
 fn default_capture_device_with(enumerator: &IMMDeviceEnumerator) -> WinResult<IMMDevice> {
+    // SAFETY: enumerator is a valid IMMDeviceEnumerator borrowed from the caller; the method
+    // returns an owned IMMDevice on success.
     unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications) }
 }
 
 fn device_enumerator() -> WinResult<IMMDeviceEnumerator> {
+    // SAFETY: MMDeviceEnumerator is the well-known CLSID for this coclass; callers initialize
+    // COM on this thread first (via ComApartment), and no outer aggregation is used (None).
     unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
 }
 
 fn endpoint_volume(device: &IMMDevice) -> WinResult<IAudioEndpointVolume> {
+    // SAFETY: device is a valid IMMDevice; Activate with no activation params is valid for
+    // IAudioEndpointVolume and returns an owned interface on success.
     unsafe { device.Activate(CLSCTX_ALL, None) }
 }
 
 fn endpoint_meter(device: &IMMDevice) -> WinResult<IAudioMeterInformation> {
+    // SAFETY: device is a valid IMMDevice; Activate with no activation params is valid for
+    // IAudioMeterInformation and returns an owned interface on success.
     unsafe { device.Activate(CLSCTX_ALL, None) }
 }
 
 fn describe_device(device: &IMMDevice) -> WinResult<DeviceInfo> {
+    // SAFETY: device is a valid IMMDevice; GetId returns an owned, null-terminated PWSTR
+    // that is read immediately by to_string.
     let id = unsafe { device.GetId()?.to_string().unwrap_or_default() };
+    // SAFETY: same valid IMMDevice; GetState only writes its out-param.
     let state = unsafe { device.GetState()? };
 
     Ok(DeviceInfo {
@@ -776,10 +839,16 @@ fn describe_device(device: &IMMDevice) -> WinResult<DeviceInfo> {
 }
 
 fn device_name(device: &IMMDevice) -> WinResult<String> {
+    // SAFETY: device is a valid IMMDevice; STGM_READ is a supported access mode and the
+    // returned store is an owned IPropertyStore.
     let store = unsafe { device.OpenPropertyStore(STGM_READ)? };
+    // SAFETY: store is the live IPropertyStore opened above; GetValue writes an initialized
+    // PROPVARIANT that we own (cleared below with PropVariantClear).
     let mut value = unsafe { store.GetValue(&PKEY_Device_FriendlyName)? };
     // PROPVARIANT is a tagged union; pwszVal is only valid when vt is VT_LPWSTR
     // (a device may report the property as VT_EMPTY or another type).
+    // SAFETY: the vt tag is checked to be VT_LPWSTR before the pwszVal union field is read,
+    // and the string is owned by value, which is still alive here.
     let name = unsafe {
         if value.Anonymous.Anonymous.vt == VT_LPWSTR {
             value
@@ -793,6 +862,8 @@ fn device_name(device: &IMMDevice) -> WinResult<String> {
             String::new()
         }
     };
+    // SAFETY: value is the PROPVARIANT initialized by GetValue above and is cleared exactly
+    // once; the borrowed pwszVal string is no longer used after this point.
     unsafe { PropVariantClear(&mut value)? };
 
     if name.trim().is_empty() {
