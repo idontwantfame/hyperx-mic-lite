@@ -1267,56 +1267,29 @@ fn send_feature_packet(
     let mut with_report_id = [0u8; 65];
     with_report_id[1..].copy_from_slice(packet);
 
+    let send_feature_id = || device.send_feature_report(&with_report_id);
+    let send_feature = || device.send_feature_report(packet);
+    let send_output_id = || device.write(&with_report_id).map(|_| ());
+    let send_output = || device.write(packet).map(|_| ());
+    let attempts: [(&str, &dyn Fn() -> hidapi::HidResult<()>); 4] = [
+        ("feature+id", &send_feature_id),
+        ("feature", &send_feature),
+        ("output+id", &send_output_id),
+        ("output", &send_output),
+    ];
+
     let mut errors = Vec::new();
-
-    if let Err(error) = device.send_feature_report(&with_report_id) {
-        log_hid_packet_attempt(
-            packet_log,
-            "feature+id",
-            false,
-            packet,
-            Some(error.to_string()),
-        );
-        errors.push(format!("feature+id: {error}"));
-    } else {
-        log_hid_packet_attempt(packet_log, "feature+id", true, packet, None);
-        return Ok(());
-    }
-
-    if let Err(error) = device.send_feature_report(packet) {
-        log_hid_packet_attempt(
-            packet_log,
-            "feature",
-            false,
-            packet,
-            Some(error.to_string()),
-        );
-        errors.push(format!("feature: {error}"));
-    } else {
-        log_hid_packet_attempt(packet_log, "feature", true, packet, None);
-        return Ok(());
-    }
-
-    if let Err(error) = device.write(&with_report_id) {
-        log_hid_packet_attempt(
-            packet_log,
-            "output+id",
-            false,
-            packet,
-            Some(error.to_string()),
-        );
-        errors.push(format!("output+id: {error}"));
-    } else {
-        log_hid_packet_attempt(packet_log, "output+id", true, packet, None);
-        return Ok(());
-    }
-
-    if let Err(error) = device.write(packet) {
-        log_hid_packet_attempt(packet_log, "output", false, packet, Some(error.to_string()));
-        errors.push(format!("output: {error}"));
-    } else {
-        log_hid_packet_attempt(packet_log, "output", true, packet, None);
-        return Ok(());
+    for (name, attempt) in attempts {
+        match attempt() {
+            Ok(()) => {
+                log_hid_packet_attempt(packet_log, name, true, packet, None);
+                return Ok(());
+            }
+            Err(error) => {
+                log_hid_packet_attempt(packet_log, name, false, packet, Some(error.to_string()));
+                errors.push(format!("{name}: {error}"));
+            }
+        }
     }
 
     Err(errors.join("; "))
