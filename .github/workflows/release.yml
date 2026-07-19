@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    paths:
+      - .github/workflows/release.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, for example 0.2.0
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub release as prerelease
+        required: true
+        default: false
+        type: boolean
+      draft:
+        description: Create the GitHub release as a draft
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  index:
+    name: Index Workflow
+    if: github.event_name == 'push'
+    runs-on: windows-latest
+    steps:
+      - name: Indexed
+        run: echo "Release workflow is available from workflow_dispatch."
+
+  release:
+    name: Build And Publish
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Version
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}"
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') {
+            throw "Version '$version' is not SemVer. Use values like 0.2.0 or 1.0.0-beta.1."
+          }
+          $existingTag = git tag --list "v$version"
+          if ($existingTag) {
+            throw "Tag v$version already exists."
+          }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Bump Cargo Version
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}"
+          $toml = Get-Content Cargo.toml -Raw
+          $toml = $toml -replace '(?m)^version = ".*"$', "version = `"$version`""
+          Set-Content Cargo.toml -Value $toml -NoNewline
+          cargo check --all-targets
+
+      - name: Format Check
+        run: cargo fmt --all -- --check
+
+      - name: Test
+        run: cargo test --all-targets --locked
+
+      - name: Build Release
+        run: cargo build --release --locked
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}"
+          $name = "hyperx-mic-lite-v$version-windows-x86_64-msvc"
+          if (Test-Path "dist") { Remove-Item "dist" -Recurse -Force }
+          $dist = Join-Path $PWD "dist\$name"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "target\release\hyperx-mic-lite.exe" $dist
+          $zip = Join-Path $PWD "dist\$name.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = "$hash  $name.zip"
+          Set-Content -Path "$zip.sha256" -Value $checksum
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "sha=$zip.sha256" >> $env:GITHUB_OUTPUT
+          "asset_name=$name.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Commit Version Bump
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.version }}"
+          git config user.name "anonymous"
+          git config user.email "anonymous@example.invalid"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release v$version"
+          git tag -a "v$version" -m "Release v$version"
+          git push origin HEAD
+          git push origin "v$version"
+
+      - name: Upload Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset_name }}
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.sha }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: HyperX Mic Lite v${{ inputs.version }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.sha }}
