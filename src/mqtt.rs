@@ -634,3 +634,136 @@ impl MqttTopics {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn topics() -> MqttTopics {
+        MqttTopics {
+            base: "hyperx/mic".to_string(),
+            discovery_prefix: "homeassistant".to_string(),
+        }
+    }
+
+    #[test]
+    fn parses_mute_on_off_and_toggle() {
+        let topics = topics();
+
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/mute", "ON"),
+            Some(MqttCommand::SetMute(true))
+        ));
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/mute", "off"),
+            Some(MqttCommand::SetMute(false))
+        ));
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/mute", "toggle"),
+            Some(MqttCommand::ToggleMute)
+        ));
+    }
+
+    #[test]
+    fn parses_volume_commands_within_range() {
+        let topics = topics();
+
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/mic_volume", "55"),
+            Some(MqttCommand::SetMicVolume(55))
+        ));
+        assert!(parse_command(&topics, "hyperx/mic/command/mic_volume", "101").is_none());
+        assert!(parse_command(&topics, "hyperx/mic/command/mic_volume", "loud").is_none());
+    }
+
+    #[test]
+    fn trims_payload_whitespace() {
+        let topics = topics();
+
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/brightness", " 42 "),
+            Some(MqttCommand::SetBrightness(42))
+        ));
+    }
+
+    #[test]
+    fn parses_effect_and_target() {
+        let topics = topics();
+
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/effect", "wave"),
+            Some(MqttCommand::SetEffect(Effect::Wave))
+        ));
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/target", "top"),
+            Some(MqttCommand::SetTarget(LightTarget::Top))
+        ));
+        assert!(parse_command(&topics, "hyperx/mic/command/effect", "disco").is_none());
+    }
+
+    #[test]
+    fn parses_button_commands() {
+        let topics = topics();
+
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/apply", ""),
+            Some(MqttCommand::ApplyLighting)
+        ));
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/stop", ""),
+            Some(MqttCommand::StopLighting)
+        ));
+        assert!(matches!(
+            parse_command(&topics, "hyperx/mic/command/save", ""),
+            Some(MqttCommand::SaveLighting)
+        ));
+    }
+
+    #[test]
+    fn returns_none_for_unknown_command_key() {
+        assert!(parse_command(&topics(), "hyperx/mic/command/reboot", "1").is_none());
+    }
+
+    #[test]
+    fn returns_none_for_foreign_topic_prefix() {
+        assert!(parse_command(&topics(), "other/device/command/mute", "on").is_none());
+    }
+
+    #[test]
+    fn topic_helpers_build_expected_paths() {
+        let topics = topics();
+
+        assert_eq!(topics.availability(), "hyperx/mic/status");
+        assert_eq!(topics.state("muted"), "hyperx/mic/state/muted");
+        assert_eq!(topics.command("mute"), "hyperx/mic/command/mute");
+        assert_eq!(topics.command_wildcard(), "hyperx/mic/command/#");
+        assert_eq!(
+            topics.discovery("switch", "mute"),
+            "homeassistant/switch/hyperx_mic_lite_mute/config"
+        );
+    }
+
+    #[test]
+    fn appends_client_id_to_plain_url() {
+        assert_eq!(
+            mqtt_url_with_client_id("mqtt://host:1883", "my client"),
+            "mqtt://host:1883?client_id=my%20client"
+        );
+    }
+
+    #[test]
+    fn appends_client_id_with_ampersand_when_query_exists() {
+        assert_eq!(
+            mqtt_url_with_client_id("mqtt://host:1883?x=1", "abc"),
+            "mqtt://host:1883?x=1&client_id=abc"
+        );
+    }
+
+    #[test]
+    fn keeps_url_that_already_has_client_id() {
+        assert_eq!(
+            mqtt_url_with_client_id("mqtt://host:1883?client_id=set", "abc"),
+            "mqtt://host:1883?client_id=set"
+        );
+    }
+}
