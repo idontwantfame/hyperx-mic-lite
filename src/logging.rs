@@ -117,7 +117,7 @@ fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
                 handle,
                 event_type,
                 0,
-                event_id_for(event),
+                EVENTLOG_MESSAGE_ID,
                 None,
                 0,
                 Some(&strings),
@@ -126,11 +126,6 @@ fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
             let _ = DeregisterEventSource(handle);
         }
     }
-}
-
-fn event_id_for(event: &str) -> u32 {
-    let _ = event;
-    EVENTLOG_MESSAGE_ID
 }
 
 fn write_crash_report(message: &str, location: &str) -> Result<PathBuf, String> {
