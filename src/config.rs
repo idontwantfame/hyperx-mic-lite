@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    error, fmt, fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +11,41 @@ use crate::{
     paths::{config_dir, config_path},
     time::unix_timestamp_seconds,
 };
+
+#[derive(Debug)]
+pub(crate) enum ConfigError {
+    Io { path: PathBuf, source: io::Error },
+    InvalidJson { path: PathBuf, message: String },
+    InvalidConfig { path: PathBuf, message: String },
+    Validation(String),
+    Serialize(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
+            Self::InvalidJson { path, message } => {
+                write!(formatter, "{}: invalid JSON: {message}", path.display())
+            }
+            Self::InvalidConfig { path, message } => {
+                write!(formatter, "{}: invalid config: {message}", path.display())
+            }
+            Self::Validation(message) | Self::Serialize(message) => {
+                write!(formatter, "{message}")
+            }
+        }
+    }
+}
+
+impl error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 fn default_lighting_target() -> String {
     "all".to_string()
@@ -283,7 +321,11 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_fields().map_err(ConfigError::Validation)
+    }
+
+    fn validate_fields(&self) -> Result<(), String> {
         if self.schema_version == 0 || self.schema_version > CONFIG_SCHEMA_VERSION {
             return Err(format!(
                 "Unsupported config schema version {}.",
@@ -417,7 +459,7 @@ fn validate_topic_prefix(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn load_or_create_config() -> Result<AppConfig, String> {
+pub(crate) fn load_or_create_config() -> Result<AppConfig, ConfigError> {
     let path = config_path();
     if !path.exists() {
         let config = AppConfig::default();
@@ -427,13 +469,23 @@ pub(crate) fn load_or_create_config() -> Result<AppConfig, String> {
     load_config_from_path(&path)
 }
 
-pub(crate) fn load_config_from_path(path: &Path) -> Result<AppConfig, String> {
-    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let value = serde_json::from_str::<serde_json::Value>(&text)
-        .map_err(|error| format!("{}: invalid JSON: {error}", path.display()))?;
+pub(crate) fn load_config_from_path(path: &Path) -> Result<AppConfig, ConfigError> {
+    let text = fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).map_err(|error| {
+        ConfigError::InvalidJson {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }
+    })?;
     let migrated = migrate_config_value(value);
     let config = serde_json::from_value::<AppConfig>(migrated)
-        .map_err(|error| format!("{}: invalid config: {error}", path.display()))?
+        .map_err(|error| ConfigError::InvalidConfig {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?
         .migrated();
     config.validate()?;
     log_event(
@@ -465,18 +517,27 @@ fn merge_missing_json(value: &mut serde_json::Value, defaults: &serde_json::Valu
     }
 }
 
-pub(crate) fn save_config(config: &AppConfig) -> Result<(), String> {
+pub(crate) fn save_config(config: &AppConfig) -> Result<(), ConfigError> {
     config.validate()?;
     let path = config_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
-    let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    let text = serde_json::to_string_pretty(config)
+        .map_err(|error| ConfigError::Serialize(error.to_string()))?;
     // Write to a temp file and rename so a crash mid-write cannot truncate config.json.
     let temp_path = path.with_extension("json.tmp");
-    fs::write(&temp_path, format!("{text}\n"))
-        .map_err(|error| format!("{}: {error}", temp_path.display()))?;
-    fs::rename(&temp_path, &path).map_err(|error| format!("{}: {error}", path.display()))?;
+    fs::write(&temp_path, format!("{text}\n")).map_err(|source| ConfigError::Io {
+        path: temp_path.clone(),
+        source,
+    })?;
+    fs::rename(&temp_path, &path).map_err(|source| ConfigError::Io {
+        path: path.clone(),
+        source,
+    })?;
     log_event(
         "info",
         "config.save",
@@ -485,11 +546,14 @@ pub(crate) fn save_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn export_config(destination: &Path) -> Result<(), String> {
+pub(crate) fn export_config(destination: &Path) -> Result<(), ConfigError> {
     let config = load_or_create_config()?;
-    let text = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    fs::write(destination, format!("{text}\n"))
-        .map_err(|error| format!("{}: {error}", destination.display()))?;
+    let text = serde_json::to_string_pretty(&config)
+        .map_err(|error| ConfigError::Serialize(error.to_string()))?;
+    fs::write(destination, format!("{text}\n")).map_err(|source| ConfigError::Io {
+        path: destination.to_path_buf(),
+        source,
+    })?;
     log_event(
         "info",
         "config.export",
@@ -499,7 +563,7 @@ pub(crate) fn export_config(destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn import_config(source: &Path) -> Result<(), String> {
+pub(crate) fn import_config(source: &Path) -> Result<(), ConfigError> {
     let config = load_config_from_path(source)?;
     backup_config_if_present()?;
     save_config(&config)?;
@@ -512,14 +576,14 @@ pub(crate) fn import_config(source: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn validate_config_file(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_config_file(path: &Path) -> Result<(), ConfigError> {
     let config = load_config_from_path(path)?;
     config.validate()?;
     println!("Config is valid: {}", path.display());
     Ok(())
 }
 
-pub(crate) fn reset_config() -> Result<(), String> {
+pub(crate) fn reset_config() -> Result<(), ConfigError> {
     backup_config_if_present()?;
     save_config(&AppConfig::default())?;
     log_event("info", "config.reset", &[]);
@@ -527,7 +591,7 @@ pub(crate) fn reset_config() -> Result<(), String> {
     Ok(())
 }
 
-fn backup_config_if_present() -> Result<(), String> {
+fn backup_config_if_present() -> Result<(), ConfigError> {
     let path = config_path();
     if !path.exists() {
         return Ok(());
@@ -535,7 +599,10 @@ fn backup_config_if_present() -> Result<(), String> {
     let backup = config_dir().join(format!("config.backup.{}.json", unix_timestamp_seconds()));
     fs::copy(&path, &backup)
         .map(|_| ())
-        .map_err(|error| format!("{}: {error}", backup.display()))?;
+        .map_err(|source| ConfigError::Io {
+            path: backup.clone(),
+            source,
+        })?;
     log_event(
         "info",
         "config.backup",

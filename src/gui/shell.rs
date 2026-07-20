@@ -192,7 +192,11 @@ impl MicLiteApp {
             .save_file()
         {
             if let Err(error) = export_config(&dest) {
-                log_event("error", "config.export.error", &[("message", error)]);
+                log_event(
+                    "error",
+                    "config.export.error",
+                    &[("message", error.to_string())],
+                );
             }
         }
     }
@@ -204,7 +208,11 @@ impl MicLiteApp {
             .pick_file()
         {
             if let Err(error) = import_config(&source) {
-                log_event("error", "config.import.error", &[("message", error)]);
+                log_event(
+                    "error",
+                    "config.import.error",
+                    &[("message", error.to_string())],
+                );
             }
         }
     }

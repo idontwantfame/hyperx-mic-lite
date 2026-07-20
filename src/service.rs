@@ -345,7 +345,7 @@ fn run_service_worker() -> Result<(), windows_service::Error> {
 
 fn restore_service_settings() -> Result<(), String> {
     let _com = ComApartment::init().map_err(|error| error.to_string())?;
-    let config = load_or_create_config()?;
+    let config = load_or_create_config().map_err(|error| error.to_string())?;
     if config.service.restore_on_startup {
         set_mic_volume_percent(config.audio.mic_volume).map_err(|error| error.to_string())?;
         set_mic_mute(config.audio.mute_on_app_start).map_err(|error| error.to_string())?;
@@ -397,9 +397,9 @@ fn open_installed_service(
 }
 
 fn update_service_config(enabled: bool) -> Result<(), String> {
-    let mut config = load_or_create_config()?;
+    let mut config = load_or_create_config().map_err(|error| error.to_string())?;
     config.service.enabled = enabled;
-    save_config(&config)
+    save_config(&config).map_err(|error| error.to_string())
 }
 
 pub(crate) fn read_service_health() -> Result<ServiceHealth, String> {
