@@ -24,20 +24,20 @@ pub(crate) fn run_config_command(args: &[String]) {
         }
         "dump" => match load_or_create_config() {
             Ok(config) => print_config_json(&config),
-            Err(error) => Err(error),
+            Err(error) => Err(error.to_string()),
         },
         "export" => {
             if args.len() != 2 {
                 Err("Usage: hyperx-mic-lite config export <file>".to_string())
             } else {
-                export_config(Path::new(&args[1]))
+                export_config(Path::new(&args[1])).map_err(|error| error.to_string())
             }
         }
         "import" => {
             if args.len() != 2 {
                 Err("Usage: hyperx-mic-lite config import <file>".to_string())
             } else {
-                import_config(Path::new(&args[1]))
+                import_config(Path::new(&args[1])).map_err(|error| error.to_string())
             }
         }
         "validate" => {
@@ -46,9 +46,9 @@ pub(crate) fn run_config_command(args: &[String]) {
             } else {
                 config_path()
             };
-            validate_config_file(&path)
+            validate_config_file(&path).map_err(|error| error.to_string())
         }
-        "reset" => reset_config(),
+        "reset" => reset_config().map_err(|error| error.to_string()),
         _ => {
             config_usage();
             process::exit(2);

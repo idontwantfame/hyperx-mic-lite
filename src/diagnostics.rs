@@ -138,7 +138,7 @@ fn collect_lighting_hid_diagnostics() -> serde_json::Value {
                     "feature_button_caps": caps.NumberFeatureButtonCaps,
                     "feature_value_caps": caps.NumberFeatureValueCaps,
                 }),
-                Err(error) => serde_json::json!({ "error": error }),
+                Err(error) => serde_json::json!({ "error": error.to_string() }),
             };
 
             serde_json::json!({

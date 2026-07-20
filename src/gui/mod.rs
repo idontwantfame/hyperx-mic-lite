@@ -104,7 +104,11 @@ pub(crate) struct MicLiteApp {
 impl MicLiteApp {
     pub(crate) fn new(start_minimized: bool, layout_edit: bool) -> Self {
         let config = load_or_create_config().unwrap_or_else(|error| {
-            log_event("error", "config.load.error", &[("message", error)]);
+            log_event(
+                "error",
+                "config.load.error",
+                &[("message", error.to_string())],
+            );
             AppConfig::default()
         });
         let (lighting_event_sender, lighting_events) = mpsc::channel();
@@ -213,7 +217,11 @@ impl MicLiteApp {
     fn save_config_snapshot(&self) {
         let config = self.current_config_snapshot();
         if let Err(error) = save_config(&config) {
-            log_event("error", "config.save.error", &[("message", error)]);
+            log_event(
+                "error",
+                "config.save.error",
+                &[("message", error.to_string())],
+            );
         }
     }
 
@@ -272,7 +280,7 @@ impl MicLiteApp {
 
     fn save_config_result(&self) -> Result<(), String> {
         let config = self.current_config_snapshot();
-        save_config(&config)
+        save_config(&config).map_err(|error| error.to_string())
     }
 
     fn is_muted(&self) -> bool {

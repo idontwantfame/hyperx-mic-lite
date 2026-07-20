@@ -35,6 +35,29 @@ use crate::{
     logging::log_event,
     model::{Effect, HidEvent, LightTarget, LightingDevice, PolarPattern},
 };
+#[derive(Debug)]
+pub(crate) enum LightingError {
+    NoDevice,
+    Hid(String),
+    Invalid(String),
+}
+
+impl std::fmt::Display for LightingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoDevice => {
+                write!(
+                    formatter,
+                    "No supported QuadCast S lighting HID interface detected."
+                )
+            }
+            Self::Hid(message) | Self::Invalid(message) => write!(formatter, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for LightingError {}
+
 pub(crate) struct LightingState {
     pub(crate) effect: Effect,
     pub(crate) target: LightTarget,
@@ -147,7 +170,7 @@ pub(crate) fn print_lighting_hid_dump() {
     }
 }
 
-pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
+pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, LightingError> {
     let path = path.to_string_lossy();
     let wide_path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
     // SAFETY: wide_path is a null-terminated UTF-16 buffer that outlives the call; access mask 0
@@ -163,7 +186,7 @@ pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
             None,
         )
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| LightingError::Hid(error.to_string()))?;
 
     let mut preparsed: PHIDP_PREPARSED_DATA = PHIDP_PREPARSED_DATA::default();
     // SAFETY: handle is the valid HID device handle opened above; preparsed is only used after
@@ -172,7 +195,9 @@ pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
     let result = unsafe {
         if !HidD_GetPreparsedData(handle, &mut preparsed) {
             let _ = CloseHandle(handle);
-            return Err("HidD_GetPreparsedData failed".to_string());
+            return Err(LightingError::Hid(
+                "HidD_GetPreparsedData failed".to_string(),
+            ));
         }
 
         let mut caps = HIDP_CAPS::default();
@@ -183,10 +208,10 @@ pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, String> {
         if status == HIDP_STATUS_SUCCESS {
             Ok(caps)
         } else {
-            Err(format!(
+            Err(LightingError::Hid(format!(
                 "HidP_GetCaps failed with NTSTATUS 0x{:08x}",
                 status.0
-            ))
+            )))
         }
     };
 
@@ -312,7 +337,7 @@ pub(crate) fn run_lighting_solid(args: &[String]) {
             log_event(
                 "error",
                 "lighting.solid.error",
-                &[("message", error.clone())],
+                &[("message", error.to_string())],
             );
             eprintln!("{error}");
             process::exit(1);
@@ -368,7 +393,7 @@ pub(crate) fn run_lighting_effect(args: &[String]) {
             log_event(
                 "error",
                 "lighting.effect.error",
-                &[("message", error.clone())],
+                &[("message", error.to_string())],
             );
             eprintln!("{error}");
             process::exit(1);
@@ -790,14 +815,16 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-pub(crate) fn parse_rgb_hex(value: &str) -> Result<[u8; 3], String> {
+pub(crate) fn parse_rgb_hex(value: &str) -> Result<[u8; 3], LightingError> {
     let trimmed = value.trim().trim_start_matches('#');
     if trimmed.len() != 6 {
-        return Err("Color must be six hex digits, for example ff0066.".to_string());
+        return Err(LightingError::Invalid(
+            "Color must be six hex digits, for example ff0066.".to_string(),
+        ));
     }
 
     let parsed = u32::from_str_radix(trimmed, 16)
-        .map_err(|_| "Color must contain only hex digits.".to_string())?;
+        .map_err(|_| LightingError::Invalid("Color must contain only hex digits.".to_string()))?;
     Ok([
         ((parsed >> 16) & 0xff) as u8,
         ((parsed >> 8) & 0xff) as u8,
@@ -813,7 +840,7 @@ pub(crate) fn stream_lighting_program(
     program: &LightingProgram,
     duration: StreamDuration,
     packet_log: bool,
-) -> Result<(), String> {
+) -> Result<(), LightingError> {
     stream_lighting_program_cancelable(program, duration, None, packet_log)
 }
 
@@ -822,7 +849,7 @@ pub(crate) fn stream_lighting_program_cancelable(
     duration: StreamDuration,
     cancel: Option<Arc<AtomicBool>>,
     packet_log: bool,
-) -> Result<(), String> {
+) -> Result<(), LightingError> {
     let active_effect = if program.split_layers {
         None
     } else {
@@ -843,16 +870,16 @@ pub(crate) fn stream_lighting_program_cancelable(
     } else {
         None
     };
-    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+    let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
     let info = api
         .device_list()
         .filter(|device| is_supported_lighting_device(device))
         .max_by_key(|device| lighting_device_score(device))
-        .ok_or_else(|| "No supported QuadCast S lighting HID interface detected.".to_string())?;
+        .ok_or(LightingError::NoDevice)?;
 
     let device = api
         .open_path(info.path())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| LightingError::Hid(error.to_string()))?;
 
     let header = build_display_header_packet();
     let (frames, top_frames, bottom_frames) = build_program_frames(program)?;
@@ -899,14 +926,16 @@ pub(crate) fn stream_lighting_program_cancelable(
 
 type ProgramFrames = (Vec<LightingFrame>, Vec<LightingFrame>, Vec<LightingFrame>);
 
-fn build_program_frames(program: &LightingProgram) -> Result<ProgramFrames, String> {
+fn build_program_frames(program: &LightingProgram) -> Result<ProgramFrames, LightingError> {
     let frames = if program.split_layers {
         Vec::new()
     } else {
         build_effect_frames(program.effect, program)
     };
     if !program.split_layers && frames.is_empty() {
-        return Err("No lighting frames were generated.".to_string());
+        return Err(LightingError::Invalid(
+            "No lighting frames were generated.".to_string(),
+        ));
     }
     let top_frames = if program.split_layers {
         build_effect_frames(program.top_effect, program)
@@ -919,7 +948,9 @@ fn build_program_frames(program: &LightingProgram) -> Result<ProgramFrames, Stri
         Vec::new()
     };
     if program.split_layers && (top_frames.is_empty() || bottom_frames.is_empty()) {
-        return Err("No layered lighting frames were generated.".to_string());
+        return Err(LightingError::Invalid(
+            "No layered lighting frames were generated.".to_string(),
+        ));
     }
     Ok((frames, top_frames, bottom_frames))
 }
@@ -1305,7 +1336,7 @@ fn send_feature_packet(
     device: &hidapi::HidDevice,
     packet: &[u8; 64],
     packet_log: bool,
-) -> Result<(), String> {
+) -> Result<(), LightingError> {
     let mut with_report_id = [0u8; 65];
     with_report_id[1..].copy_from_slice(packet);
 
@@ -1334,7 +1365,7 @@ fn send_feature_packet(
         }
     }
 
-    Err(errors.join("; "))
+    Err(LightingError::Hid(errors.join("; ")))
 }
 
 fn read_feature_packet(device: &hidapi::HidDevice, packet_log: bool) -> Result<[u8; 64], String> {
@@ -1371,17 +1402,17 @@ fn read_feature_packet(device: &hidapi::HidDevice, packet_log: bool) -> Result<[
     }
 }
 
-pub(crate) fn save_lighting_to_microphone(packet_log: bool) -> Result<(), String> {
-    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+pub(crate) fn save_lighting_to_microphone(packet_log: bool) -> Result<(), LightingError> {
+    let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
     let info = api
         .device_list()
         .filter(|device| is_supported_lighting_device(device))
         .max_by_key(|device| lighting_device_score(device))
-        .ok_or_else(|| "No supported QuadCast S lighting HID interface detected.".to_string())?;
+        .ok_or(LightingError::NoDevice)?;
 
     let device = api
         .open_path(info.path())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| LightingError::Hid(error.to_string()))?;
 
     send_feature_packet(&device, &build_save_prepare_packet(), packet_log)?;
     send_feature_packet(&device, &build_save_state_packet(), packet_log)?;
@@ -1416,7 +1447,7 @@ pub(crate) fn write_solid_lighting_once(
     color: [u8; 3],
     brightness: u8,
     packet_log: bool,
-) -> Result<(), String> {
+) -> Result<(), LightingError> {
     let color = scale_color(color, brightness);
     write_lighting_frame_once(solid_frame(color), packet_log)
 }
@@ -1424,16 +1455,16 @@ pub(crate) fn write_solid_lighting_once(
 pub(crate) fn write_lighting_frame_once(
     frame: LightingFrame,
     packet_log: bool,
-) -> Result<(), String> {
-    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+) -> Result<(), LightingError> {
+    let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
     let info = api
         .device_list()
         .filter(|device| is_supported_lighting_device(device))
         .max_by_key(|device| lighting_device_score(device))
-        .ok_or_else(|| "No supported QuadCast S lighting HID interface detected.".to_string())?;
+        .ok_or(LightingError::NoDevice)?;
     let device = api
         .open_path(info.path())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| LightingError::Hid(error.to_string()))?;
     send_feature_packet(&device, &build_display_header_packet(), packet_log)?;
     send_feature_packet(&device, &build_frame_packet(frame), packet_log)
 }

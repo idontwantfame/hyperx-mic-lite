@@ -39,7 +39,11 @@ impl MicLiteApp {
         );
         thread::spawn(move || {
             if let Err(error) = write_solid_lighting_once(color, brightness, false) {
-                log_event("error", "lighting.live_mute.error", &[("message", error)]);
+                log_event(
+                    "error",
+                    "lighting.live_mute.error",
+                    &[("message", error.to_string())],
+                );
             }
         });
     }
@@ -134,8 +138,9 @@ impl MicLiteApp {
                     );
                 }
                 Err(error) => {
-                    let _ = sender.send(LightingUiEvent::ApplyFailed(error.clone()));
-                    log_event("error", "lighting.apply.error", &[("message", error)]);
+                    let message = error.to_string();
+                    let _ = sender.send(LightingUiEvent::ApplyFailed(message.clone()));
+                    log_event("error", "lighting.apply.error", &[("message", message)]);
                 }
             }
         });
@@ -162,8 +167,9 @@ impl MicLiteApp {
                 log_event("info", "lighting.save.done", &[]);
             }
             Err(error) => {
-                let _ = sender.send(LightingUiEvent::SaveFailed(error.clone()));
-                log_event("error", "lighting.save.error", &[("message", error)]);
+                let message = error.to_string();
+                let _ = sender.send(LightingUiEvent::SaveFailed(message.clone()));
+                log_event("error", "lighting.save.error", &[("message", message)]);
             }
         });
     }
