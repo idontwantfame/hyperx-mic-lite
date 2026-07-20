@@ -743,11 +743,20 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    // expect_err would require AppConfig: Debug, which we deliberately avoid deriving
+    // (MqttConfig carries a password that must not become printable crate-wide).
+    fn expect_load_error(path: &Path, context: &str) -> ConfigError {
+        match load_config_from_path(path) {
+            Err(error) => error,
+            Ok(_) => panic!("{context}: expected load_config_from_path to fail"),
+        }
+    }
+
     #[test]
     fn load_reports_unreadable_file_as_io_error() {
         let path = std::env::temp_dir().join("hyperx-mic-lite-config-tests-missing/none.json");
 
-        let error = load_config_from_path(&path).expect_err("missing file");
+        let error = expect_load_error(&path, "missing file");
 
         assert!(matches!(error, ConfigError::Io { .. }));
     }
@@ -756,7 +765,7 @@ mod tests {
     fn load_reports_malformed_json() {
         let path = temp_config_file("malformed.json", "{ not json");
 
-        let error = load_config_from_path(&path).expect_err("malformed JSON");
+        let error = expect_load_error(&path, "malformed JSON");
 
         assert!(matches!(error, ConfigError::InvalidJson { .. }));
         let _ = fs::remove_file(&path);
@@ -773,7 +782,7 @@ mod tests {
         let path = temp_config_file("invalid-values.json", &text);
 
         // Act
-        let error = load_config_from_path(&path).expect_err("200% must be rejected");
+        let error = expect_load_error(&path, "200% must be rejected");
 
         // Assert
         assert!(matches!(error, ConfigError::Validation(_)));
