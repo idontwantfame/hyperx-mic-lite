@@ -14,6 +14,8 @@ use crate::{
     model::{Effect, LightTarget},
 };
 
+const MQTT_COMMAND_QUEUE_LIMIT: usize = 32;
+
 #[derive(Debug)]
 pub(crate) enum MqttCommand {
     SetMute(bool),
@@ -108,7 +110,9 @@ pub(crate) fn start_mqtt_runtime(config: &MqttConfig) -> Option<MqttRuntime> {
         qos,
         retain_state: config.retain_state,
     };
-    let (sender, receiver) = mpsc::channel();
+    // Bounded so a flooding publisher cannot grow the queue without limit; the GUI
+    // drains it every frame, so 32 pending commands is already an abnormal backlog.
+    let (sender, receiver) = mpsc::sync_channel(MQTT_COMMAND_QUEUE_LIMIT);
     let discovery_enabled = config.home_assistant_discovery;
 
     thread::spawn(move || {
@@ -144,7 +148,13 @@ pub(crate) fn start_mqtt_runtime(config: &MqttConfig) -> Option<MqttRuntime> {
                         &publish.topic,
                         &String::from_utf8_lossy(&publish.payload),
                     ) {
-                        let _ = sender.send(command);
+                        if let Err(error) = sender.try_send(command) {
+                            log_event(
+                                "warn",
+                                "mqtt.command.dropped",
+                                &[("message", error.to_string())],
+                            );
+                        }
                     }
                 }
                 Ok(_) => {}

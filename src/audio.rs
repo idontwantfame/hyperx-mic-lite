@@ -19,7 +19,7 @@ use windows::{
         },
         System::{
             Com::StructuredStorage::PropVariantClear,
-            Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ},
+            Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ},
             Variant::VT_LPWSTR,
         },
     },
@@ -769,10 +769,7 @@ pub(crate) fn mic_status() -> WinResult<MicStatus> {
 pub(crate) fn list_capture_devices() -> WinResult<Vec<DeviceInfo>> {
     let enumerator = device_enumerator()?;
     let default_id = default_capture_device_with(&enumerator)
-        // SAFETY: device is a valid IMMDevice; GetId returns an owned, null-terminated PWSTR.
-        .and_then(|device| unsafe { device.GetId() })
-        // SAFETY: id is the null-terminated PWSTR returned by GetId above, read immediately.
-        .map(|id| unsafe { id.to_string().unwrap_or_default() })
+        .and_then(|device| device_id_string(&device))
         .unwrap_or_default();
 
     // SAFETY: enumerator is a valid IMMDeviceEnumerator created above; the returned
@@ -823,10 +820,19 @@ fn endpoint_meter(device: &IMMDevice) -> WinResult<IAudioMeterInformation> {
     unsafe { device.Activate(CLSCTX_ALL, None) }
 }
 
-fn describe_device(device: &IMMDevice) -> WinResult<DeviceInfo> {
+fn device_id_string(device: &IMMDevice) -> WinResult<String> {
     // SAFETY: device is a valid IMMDevice; GetId returns an owned, null-terminated PWSTR
-    // that is read immediately by to_string.
-    let id = unsafe { device.GetId()?.to_string().unwrap_or_default() };
+    // allocated with CoTaskMemAlloc, owned by the caller.
+    let id = unsafe { device.GetId()? };
+    // SAFETY: id is the null-terminated PWSTR returned above, read before it is freed.
+    let text = unsafe { id.to_string().unwrap_or_default() };
+    // SAFETY: id was allocated by GetId with CoTaskMemAlloc and is not used after this free.
+    unsafe { CoTaskMemFree(Some(id.as_ptr() as *const _)) };
+    Ok(text)
+}
+
+fn describe_device(device: &IMMDevice) -> WinResult<DeviceInfo> {
+    let id = device_id_string(device)?;
     // SAFETY: same valid IMMDevice; GetState only writes its out-param.
     let state = unsafe { device.GetState()? };
 

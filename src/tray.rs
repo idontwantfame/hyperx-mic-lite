@@ -1,6 +1,6 @@
 use std::{
     mem,
-    sync::atomic::{AtomicBool, AtomicIsize, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
 };
 
@@ -30,7 +30,6 @@ use crate::{
 const TRAY_CALLBACK_MESSAGE: u32 = WM_APP + 17;
 static TRAY_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TRAY_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 pub(crate) struct TrayHandle;
 
@@ -145,7 +144,6 @@ fn run_tray_message_loop() -> Result<(), String> {
         )
     }
     .map_err(|error| error.to_string())?;
-    TRAY_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
     add_tray_icon(hwnd)?;
     log_event("info", "tray.start", &[]);
 
@@ -159,7 +157,6 @@ fn run_tray_message_loop() -> Result<(), String> {
             DispatchMessageW(&message);
         }
     }
-    TRAY_HWND.store(0, Ordering::Relaxed);
     log_event("info", "tray.stop", &[]);
     Ok(())
 }

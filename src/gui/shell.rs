@@ -223,7 +223,10 @@ impl MicLiteApp {
 
     fn open_log_terminal(&mut self) {
         let log = log_file_path();
-        let command = format!("Get-Content -Path '{}' -Wait -Tail 100", log.display());
+        // PowerShell single-quoted strings escape ' by doubling it; this keeps unusual
+        // (e.g. redirected %APPDATA%) paths from breaking out of the quoted argument.
+        let escaped_path = log.display().to_string().replace('\'', "''");
+        let command = format!("Get-Content -Path '{escaped_path}' -Wait -Tail 100");
         if let Err(error) = Command::new("cmd")
             .args([
                 "/C",
