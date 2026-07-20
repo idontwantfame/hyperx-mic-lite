@@ -1494,3 +1494,97 @@ fn log_hid_packet_attempt(
     }
     log_event("info", "hid.packet.write", &fields);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hex_color_without_prefix() {
+        assert_eq!(parse_rgb_hex("ff0066").expect("valid"), [0xff, 0x00, 0x66]);
+    }
+
+    #[test]
+    fn parses_hex_color_with_hash_and_uppercase() {
+        assert_eq!(parse_rgb_hex("#FF0066").expect("valid"), [0xff, 0x00, 0x66]);
+    }
+
+    #[test]
+    fn rejects_wrong_length_color() {
+        assert!(matches!(
+            parse_rgb_hex("ff00"),
+            Err(LightingError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_hex_digits() {
+        assert!(matches!(
+            parse_rgb_hex("zzzzzz"),
+            Err(LightingError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn color_to_hex_round_trips_through_parse() {
+        // Arrange
+        let color = egui::Color32::from_rgb(255, 0, 102);
+
+        // Act
+        let hex = color_to_hex(color);
+        let parsed = parse_rgb_hex(&hex).expect("round trip");
+
+        // Assert
+        assert_eq!(hex, "#ff0066");
+        assert_eq!(parsed, [255, 0, 102]);
+    }
+
+    #[test]
+    fn vu_target_level_stays_in_unit_range() {
+        assert_eq!(vu_target_level(0.0), 0.0);
+        assert!((vu_target_level(1.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn vu_target_level_is_monotonic() {
+        assert!(vu_target_level(0.0001) < vu_target_level(0.01));
+    }
+
+    #[test]
+    fn smooth_vu_level_rises_faster_than_it_falls() {
+        // Arrange / Act
+        let rise = smooth_vu_level(0.0, 1.0);
+        let fall = 1.0 - smooth_vu_level(1.0, 0.0);
+
+        // Assert: attack coefficient 0.42 vs release 0.14
+        assert!((rise - 0.42).abs() < 1e-6);
+        assert!((fall - 0.14).abs() < 1e-6);
+        assert!(rise > fall);
+    }
+
+    #[test]
+    fn decodes_mute_hid_event_with_and_without_report_id() {
+        assert!(matches!(
+            decode_hid_event(&[0x05, 0x10, 1]),
+            Some(HidEvent::Mute(true))
+        ));
+        assert!(matches!(
+            decode_hid_event(&[0x00, 0x05, 0x10, 0]),
+            Some(HidEvent::Mute(false))
+        ));
+    }
+
+    #[test]
+    fn decodes_pattern_hid_event() {
+        assert!(matches!(
+            decode_hid_event(&[0x05, 0x11, 2]),
+            Some(HidEvent::Pattern(_))
+        ));
+    }
+
+    #[test]
+    fn ignores_unrelated_hid_reports() {
+        assert!(decode_hid_event(&[0x01, 0x02, 0x03]).is_none());
+        assert!(decode_hid_event(&[]).is_none());
+    }
+}

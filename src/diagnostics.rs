@@ -214,3 +214,90 @@ fn redact_url_credentials(url: &str) -> String {
         _ => url.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_sensitive_keys() {
+        // Arrange
+        let value = serde_json::json!({
+            "password": "hunter2",
+            "api_token": "tok",
+            "client_secret": "sec",
+            "config_path": "C:\\Users\\someone",
+            "endpoint_id": "abc",
+            "device_id": "def",
+        });
+
+        // Act
+        let redacted = redact_json_value(value);
+
+        // Assert
+        for key in [
+            "password",
+            "api_token",
+            "client_secret",
+            "config_path",
+            "endpoint_id",
+            "device_id",
+        ] {
+            assert_eq!(redacted[key], "<redacted>", "key {key} must be redacted");
+        }
+    }
+
+    #[test]
+    fn keeps_non_sensitive_keys_untouched() {
+        let value = serde_json::json!({ "volume": 50, "name": "QuadCast S" });
+
+        let redacted = redact_json_value(value);
+
+        assert_eq!(redacted["volume"], 50);
+        assert_eq!(redacted["name"], "QuadCast S");
+    }
+
+    #[test]
+    fn traverses_nested_objects_and_arrays() {
+        let value = serde_json::json!({
+            "mqtt": { "password": "x" },
+            "entries": [ { "token": "y" }, { "plain": "z" } ],
+        });
+
+        let redacted = redact_json_value(value);
+
+        assert_eq!(redacted["mqtt"]["password"], "<redacted>");
+        assert_eq!(redacted["entries"][0]["token"], "<redacted>");
+        assert_eq!(redacted["entries"][1]["plain"], "z");
+    }
+
+    #[test]
+    fn redacts_credentials_embedded_in_url_values() {
+        let value = serde_json::json!({ "url": "mqtt://user:pass@host:1883" });
+
+        let redacted = redact_json_value(value);
+
+        assert_eq!(redacted["url"], "mqtt://<redacted>@host:1883");
+    }
+
+    #[test]
+    fn redact_url_credentials_strips_userinfo() {
+        assert_eq!(
+            redact_url_credentials("mqtt://user:pass@host:1883"),
+            "mqtt://<redacted>@host:1883"
+        );
+    }
+
+    #[test]
+    fn redact_url_credentials_leaves_plain_urls_unchanged() {
+        assert_eq!(
+            redact_url_credentials("mqtt://host:1883"),
+            "mqtt://host:1883"
+        );
+    }
+
+    #[test]
+    fn redact_url_credentials_ignores_at_without_scheme() {
+        assert_eq!(redact_url_credentials("user@host"), "user@host");
+    }
+}

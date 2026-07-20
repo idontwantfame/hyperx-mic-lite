@@ -610,3 +610,173 @@ fn backup_config_if_present() -> Result<(), ConfigError> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config_file(name: &str, contents: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hyperx-mic-lite-config-tests-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(name);
+        fs::write(&path, contents).expect("write temp config");
+        path
+    }
+
+    #[test]
+    fn migrate_adds_missing_sections_with_defaults() {
+        // Arrange: old-schema config with no mqtt/ui sections
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "audio": { "mic_volume": 33 }
+        });
+
+        // Act
+        let migrated = migrate_config_value(value);
+
+        // Assert: defaults filled in, nothing else disturbed
+        assert_eq!(migrated["mqtt"]["url"], "mqtt://localhost:1883");
+        assert_eq!(migrated["ui"]["minimize_to_tray"], true);
+        assert_eq!(migrated["lighting"]["target"], "all");
+    }
+
+    #[test]
+    fn migrate_preserves_existing_values() {
+        // Arrange
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "audio": { "mic_volume": 33 },
+            "mqtt": { "url": "mqtt://broker.local:1883" }
+        });
+
+        // Act
+        let migrated = migrate_config_value(value);
+
+        // Assert
+        assert_eq!(migrated["audio"]["mic_volume"], 33);
+        assert_eq!(migrated["mqtt"]["url"], "mqtt://broker.local:1883");
+    }
+
+    #[test]
+    fn validate_accepts_default_config() {
+        assert!(AppConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_percent_above_100() {
+        // Arrange
+        let mut config = AppConfig::default();
+        config.audio.mic_volume = 101;
+
+        // Act
+        let error = config.validate().expect_err("101% must be rejected");
+
+        // Assert
+        assert!(error.to_string().contains("audio.mic_volume"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_rgb_color() {
+        let mut config = AppConfig::default();
+        config.lighting.colors = vec!["zzzzzz".to_string()];
+
+        let error = config.validate().expect_err("non-hex color must fail");
+
+        assert!(error.to_string().contains("Invalid RGB color"));
+    }
+
+    #[test]
+    fn validate_rejects_selected_color_outside_palette() {
+        let mut config = AppConfig::default();
+        config.lighting.selected_color = config.lighting.colors.len();
+
+        let error = config.validate().expect_err("out-of-range index");
+
+        assert!(error.to_string().contains("selected_color"));
+    }
+
+    #[test]
+    fn validate_rejects_topic_prefix_with_wildcards() {
+        let mut config = AppConfig::default();
+        config.mqtt.base_topic = "hyperx/#".to_string();
+
+        let error = config.validate().expect_err("wildcard topic must fail");
+
+        assert!(error.to_string().contains("wildcards"));
+    }
+
+    #[test]
+    fn validate_rejects_slash_wrapped_topic_prefix() {
+        let mut config = AppConfig::default();
+        config.mqtt.base_topic = "/hyperx".to_string();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_non_finite_window_position() {
+        let mut config = AppConfig::default();
+        config.ui.window_x = Some(f32::NAN);
+
+        let error = config.validate().expect_err("NaN position must fail");
+
+        assert!(error.to_string().contains("ui.window_x"));
+    }
+
+    #[test]
+    fn load_round_trips_default_config() {
+        // Arrange
+        let text = serde_json::to_string_pretty(&AppConfig::default()).expect("serialize");
+        let path = temp_config_file("roundtrip.json", &text);
+
+        // Act
+        let loaded = load_config_from_path(&path).expect("load config");
+
+        // Assert
+        let defaults = AppConfig::default();
+        assert_eq!(loaded.schema_version, defaults.schema_version);
+        assert_eq!(loaded.audio.mic_volume, defaults.audio.mic_volume);
+        assert_eq!(loaded.mqtt.base_topic, defaults.mqtt.base_topic);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_reports_unreadable_file_as_io_error() {
+        let path = std::env::temp_dir().join("hyperx-mic-lite-config-tests-missing/none.json");
+
+        let error = load_config_from_path(&path).expect_err("missing file");
+
+        assert!(matches!(error, ConfigError::Io { .. }));
+    }
+
+    #[test]
+    fn load_reports_malformed_json() {
+        let path = temp_config_file("malformed.json", "{ not json");
+
+        let error = load_config_from_path(&path).expect_err("malformed JSON");
+
+        assert!(matches!(error, ConfigError::InvalidJson { .. }));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_rejects_out_of_range_values_as_validation_error() {
+        // Arrange: schema gets migrated, but the bad value must still fail validation
+        let text = serde_json::json!({
+            "schema_version": 1,
+            "audio": { "mic_volume": 200 }
+        })
+        .to_string();
+        let path = temp_config_file("invalid-values.json", &text);
+
+        // Act
+        let error = load_config_from_path(&path).expect_err("200% must be rejected");
+
+        // Assert
+        assert!(matches!(error, ConfigError::Validation(_)));
+        let _ = fs::remove_file(&path);
+    }
+}
