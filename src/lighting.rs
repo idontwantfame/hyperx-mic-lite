@@ -27,7 +27,9 @@ use windows::{
 };
 
 use crate::{
-    audio::{input_peak_value, mic_status, peak_from_bits, start_audio_peak_monitor},
+    audio::{
+        AudioPeakMonitor, input_peak_value, mic_status, peak_from_bits, start_audio_peak_monitor,
+    },
     com::ComApartment,
     config::{AppConfig, load_or_create_config},
     logging::log_event,
@@ -853,51 +855,12 @@ pub(crate) fn stream_lighting_program_cancelable(
         .map_err(|error| error.to_string())?;
 
     let header = build_display_header_packet();
-    let frames = if program.split_layers {
-        Vec::new()
-    } else {
-        build_effect_frames(program.effect, program)
-    };
-    if !program.split_layers && frames.is_empty() {
-        return Err("No lighting frames were generated.".to_string());
-    }
-    let top_frames = if program.split_layers {
-        build_effect_frames(program.top_effect, program)
-    } else {
-        Vec::new()
-    };
-    let bottom_frames = if program.split_layers {
-        build_effect_frames(program.bottom_effect, program)
-    } else {
-        Vec::new()
-    };
-    if program.split_layers && (top_frames.is_empty() || bottom_frames.is_empty()) {
-        return Err("No layered lighting frames were generated.".to_string());
-    }
+    let (frames, top_frames, bottom_frames) = build_program_frames(program)?;
     let started = std::time::Instant::now();
     let mut index = 0usize;
     let frame_delay = effect_frame_delay(program.speed);
-    let mut vu_level = 0.18f32;
-    let mut vu_tick = 0u32;
-    let mut meter_error_logged = false;
-    let capture_monitor =
-        if active_effect == Some(Effect::VuMeter) && program.shared_peak_bits.is_none() {
-            match start_audio_peak_monitor() {
-                Ok(monitor) => {
-                    log_event("info", "lighting.vu.capture.start", &[]);
-                    Some(monitor)
-                }
-                Err(error) => {
-                    log_event("warn", "lighting.vu.capture.error", &[("message", error)]);
-                    None
-                }
-            }
-        } else {
-            if active_effect == Some(Effect::VuMeter) {
-                log_event("info", "lighting.vu.capture.shared", &[]);
-            }
-            None
-        };
+    let mut vu_meter = VuMeterState::new();
+    let capture_monitor = start_vu_capture_monitor(program, active_effect);
 
     while match duration {
         StreamDuration::Timed(duration) => started.elapsed() < duration,
@@ -910,49 +873,7 @@ pub(crate) fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if active_effect == Some(Effect::VuMeter) {
-            let direct_peak = if let Some(peak_bits) = &program.shared_peak_bits {
-                peak_from_bits(peak_bits)
-            } else if let Some(monitor) = &capture_monitor {
-                monitor.peak()
-            } else {
-                0.0
-            };
-            // The per-frame endpoint meter query is expensive (fresh COM objects
-            // each call); only fall back to it when no direct capture is available.
-            let endpoint_peak = if program.shared_peak_bits.is_none() && capture_monitor.is_none() {
-                match input_peak_value() {
-                    Ok(peak) => peak,
-                    Err(error) => {
-                        if !meter_error_logged {
-                            log_event(
-                                "warn",
-                                "lighting.vu.meter.error",
-                                &[("message", error.to_string())],
-                            );
-                            meter_error_logged = true;
-                        }
-                        0.0
-                    }
-                }
-            } else {
-                0.0
-            };
-            let target = vu_target_level(direct_peak.max(endpoint_peak));
-            vu_level = smooth_vu_level(vu_level, target);
-            vu_tick = vu_tick.wrapping_add(1);
-            if vu_tick % 50 == 0 {
-                log_event(
-                    "info",
-                    "lighting.vu.level",
-                    &[
-                        ("direct", format!("{direct_peak:.4}")),
-                        ("endpoint", format!("{endpoint_peak:.4}")),
-                        ("target", format!("{target:.3}")),
-                        ("level", format!("{vu_level:.3}")),
-                    ],
-                );
-            }
-            build_vu_frame(vu_level, program.brightness, vu_tick)
+            vu_meter.next_frame(program, capture_monitor.as_ref())
         } else if program.split_layers {
             let top = top_frames[index % top_frames.len()];
             let bottom = bottom_frames[index % bottom_frames.len()];
@@ -974,6 +895,122 @@ pub(crate) fn stream_lighting_program_cancelable(
     }
 
     Ok(())
+}
+
+type ProgramFrames = (Vec<LightingFrame>, Vec<LightingFrame>, Vec<LightingFrame>);
+
+fn build_program_frames(program: &LightingProgram) -> Result<ProgramFrames, String> {
+    let frames = if program.split_layers {
+        Vec::new()
+    } else {
+        build_effect_frames(program.effect, program)
+    };
+    if !program.split_layers && frames.is_empty() {
+        return Err("No lighting frames were generated.".to_string());
+    }
+    let top_frames = if program.split_layers {
+        build_effect_frames(program.top_effect, program)
+    } else {
+        Vec::new()
+    };
+    let bottom_frames = if program.split_layers {
+        build_effect_frames(program.bottom_effect, program)
+    } else {
+        Vec::new()
+    };
+    if program.split_layers && (top_frames.is_empty() || bottom_frames.is_empty()) {
+        return Err("No layered lighting frames were generated.".to_string());
+    }
+    Ok((frames, top_frames, bottom_frames))
+}
+
+fn start_vu_capture_monitor(
+    program: &LightingProgram,
+    active_effect: Option<Effect>,
+) -> Option<AudioPeakMonitor> {
+    if active_effect != Some(Effect::VuMeter) {
+        return None;
+    }
+    if program.shared_peak_bits.is_some() {
+        log_event("info", "lighting.vu.capture.shared", &[]);
+        return None;
+    }
+    match start_audio_peak_monitor() {
+        Ok(monitor) => {
+            log_event("info", "lighting.vu.capture.start", &[]);
+            Some(monitor)
+        }
+        Err(error) => {
+            log_event("warn", "lighting.vu.capture.error", &[("message", error)]);
+            None
+        }
+    }
+}
+
+struct VuMeterState {
+    level: f32,
+    tick: u32,
+    meter_error_logged: bool,
+}
+
+impl VuMeterState {
+    fn new() -> Self {
+        Self {
+            level: 0.18,
+            tick: 0,
+            meter_error_logged: false,
+        }
+    }
+
+    fn next_frame(
+        &mut self,
+        program: &LightingProgram,
+        capture_monitor: Option<&AudioPeakMonitor>,
+    ) -> LightingFrame {
+        let direct_peak = if let Some(peak_bits) = &program.shared_peak_bits {
+            peak_from_bits(peak_bits)
+        } else if let Some(monitor) = capture_monitor {
+            monitor.peak()
+        } else {
+            0.0
+        };
+        // The per-frame endpoint meter query is expensive (fresh COM objects
+        // each call); only fall back to it when no direct capture is available.
+        let endpoint_peak = if program.shared_peak_bits.is_none() && capture_monitor.is_none() {
+            match input_peak_value() {
+                Ok(peak) => peak,
+                Err(error) => {
+                    if !self.meter_error_logged {
+                        log_event(
+                            "warn",
+                            "lighting.vu.meter.error",
+                            &[("message", error.to_string())],
+                        );
+                        self.meter_error_logged = true;
+                    }
+                    0.0
+                }
+            }
+        } else {
+            0.0
+        };
+        let target = vu_target_level(direct_peak.max(endpoint_peak));
+        self.level = smooth_vu_level(self.level, target);
+        self.tick = self.tick.wrapping_add(1);
+        if self.tick % 50 == 0 {
+            log_event(
+                "info",
+                "lighting.vu.level",
+                &[
+                    ("direct", format!("{direct_peak:.4}")),
+                    ("endpoint", format!("{endpoint_peak:.4}")),
+                    ("target", format!("{target:.3}")),
+                    ("level", format!("{:.3}", self.level)),
+                ],
+            );
+        }
+        build_vu_frame(self.level, program.brightness, self.tick)
+    }
 }
 
 fn build_display_header_packet() -> [u8; 64] {
