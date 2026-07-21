@@ -27,7 +27,7 @@ use crate::{
     },
     logging::log_event,
     model::{Effect, HidEvent, LightTarget, LightingDevice, MicStatus, PolarPattern, Tab},
-    mqtt::{MqttBridge, MqttCommand, start_mqtt_runtime},
+    mqtt::{MqttBridge, MqttCommand, MqttStateSnapshot, start_mqtt_runtime},
     tray::TrayHandle,
 };
 
@@ -79,6 +79,8 @@ pub(crate) struct MicLiteApp {
     mqtt_settings_message: Option<UiNotice>,
     mqtt_password_visible: bool,
     last_mqtt_publish: Instant,
+    last_mqtt_input_level_muted: Option<bool>,
+    last_mqtt_state: Option<MqttStateSnapshot>,
     lighting_autostart_applied: bool,
     minimize_to_tray: bool,
     hidden_to_tray: bool,
@@ -179,6 +181,8 @@ impl MicLiteApp {
             mqtt_settings_message: None,
             mqtt_password_visible: false,
             last_mqtt_publish: Instant::now(),
+            last_mqtt_input_level_muted: None,
+            last_mqtt_state: None,
             lighting_autostart_applied: false,
             minimize_to_tray: config.ui.minimize_to_tray,
             hidden_to_tray: false,

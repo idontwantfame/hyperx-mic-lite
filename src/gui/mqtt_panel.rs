@@ -130,7 +130,18 @@ impl MicLiteApp {
                     self.mic_volume,
                 )
             };
-        bridge.publish_state(&MqttStateSnapshot {
+        let input_level_percent = if muted {
+            if self.last_mqtt_input_level_muted == Some(true) {
+                None
+            } else {
+                Some(0.0)
+            }
+        } else {
+            Some(self.input_peak.sqrt().clamp(0.0, 1.0) * 100.0)
+        };
+        self.last_mqtt_input_level_muted = Some(muted);
+
+        let state = MqttStateSnapshot {
             available,
             device_name,
             device_state,
@@ -138,7 +149,7 @@ impl MicLiteApp {
             mic_volume,
             mic_monitoring: self.mic_monitoring,
             headphone_volume: self.headphone_volume,
-            input_level_percent: self.input_peak.sqrt().clamp(0.0, 1.0) * 100.0,
+            input_level_percent,
             polar_pattern: self.polar_pattern.as_config().to_string(),
             lighting_available: self.lighting_device.is_some(),
             effect: self.lighting.effect.as_config().to_string(),
@@ -147,7 +158,9 @@ impl MicLiteApp {
             speed: self.lighting.speed,
             opacity: self.lighting.opacity,
             live_when_muted: self.lighting.live_when_muted,
-        });
+        };
+        bridge.publish_state(&state, self.last_mqtt_state.as_ref());
+        self.last_mqtt_state = Some(state);
     }
 
     pub(super) fn ui_mqtt_settings_window(&mut self, ctx: &egui::Context) {
