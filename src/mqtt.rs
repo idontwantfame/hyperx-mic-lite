@@ -53,7 +53,7 @@ struct MqttTopics {
     discovery_prefix: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct MqttStateSnapshot {
     pub(crate) available: bool,
     pub(crate) device_name: String,
@@ -62,7 +62,8 @@ pub(crate) struct MqttStateSnapshot {
     pub(crate) mic_volume: u8,
     pub(crate) mic_monitoring: u8,
     pub(crate) headphone_volume: u8,
-    pub(crate) input_level_percent: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) input_level_percent: Option<f32>,
     pub(crate) polar_pattern: String,
     pub(crate) lighting_available: bool,
     pub(crate) effect: String,
@@ -175,52 +176,94 @@ pub(crate) fn start_mqtt_runtime(config: &MqttConfig) -> Option<MqttRuntime> {
 }
 
 impl MqttBridge {
-    pub(crate) fn publish_state(&self, state: &MqttStateSnapshot) {
-        publish_json(
-            &self.client,
-            self.topics.state("json"),
-            self.qos,
-            self.retain_state,
-            state,
-        );
-        self.publish_value(
+    pub(crate) fn publish_state(
+        &self,
+        state: &MqttStateSnapshot,
+        previous: Option<&MqttStateSnapshot>,
+    ) {
+        self.publish_status("online");
+
+        if mqtt_state_metadata_changed(state, previous) {
+            publish_json(
+                &self.client,
+                self.topics.state("json"),
+                self.qos,
+                self.retain_state,
+                state,
+            );
+        }
+
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.available,
+            state.available,
             "availability",
             if state.available { "online" } else { "offline" },
             true,
         );
-        self.publish_value("device_name", state.device_name.as_str(), true);
-        self.publish_value("device_state", state.device_state.as_str(), true);
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.device_name.clone(),
+            state.device_name.clone(),
+            "device_name",
+            state.device_name.as_str(),
+            true,
+        );
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.device_state.clone(),
+            state.device_state.clone(),
+            "device_state",
+            state.device_state.as_str(),
+            true,
+        );
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.muted,
+            state.muted,
             "mute",
             if state.muted { "ON" } else { "OFF" },
             self.retain_state,
         );
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.mic_volume,
+            state.mic_volume,
             "mic_volume",
             state.mic_volume.to_string(),
             self.retain_state,
         );
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.mic_monitoring,
+            state.mic_monitoring,
             "mic_monitoring",
             state.mic_monitoring.to_string(),
             self.retain_state,
         );
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.headphone_volume,
+            state.headphone_volume,
             "headphone_volume",
             state.headphone_volume.to_string(),
             self.retain_state,
         );
-        self.publish_value(
-            "input_level",
-            format!("{:.1}", state.input_level_percent),
-            false,
-        );
-        self.publish_value(
+        if let Some(input_level_percent) = state.input_level_percent {
+            self.publish_value("input_level", format!("{input_level_percent:.1}"), false);
+        }
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.polar_pattern.clone(),
+            state.polar_pattern.clone(),
             "polar_pattern",
             state.polar_pattern.as_str(),
             self.retain_state,
         );
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.lighting_available,
+            state.lighting_available,
             "lighting_available",
             if state.lighting_available {
                 "ON"
@@ -229,20 +272,86 @@ impl MqttBridge {
             },
             self.retain_state,
         );
-        self.publish_value("effect", state.effect.as_str(), self.retain_state);
-        self.publish_value("target", state.target.as_str(), self.retain_state);
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.effect.clone(),
+            state.effect.clone(),
+            "effect",
+            state.effect.as_str(),
+            self.retain_state,
+        );
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.target.clone(),
+            state.target.clone(),
+            "target",
+            state.target.as_str(),
+            self.retain_state,
+        );
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.brightness,
+            state.brightness,
             "brightness",
             state.brightness.to_string(),
             self.retain_state,
         );
-        self.publish_value("speed", state.speed.to_string(), self.retain_state);
-        self.publish_value("opacity", state.opacity.to_string(), self.retain_state);
-        self.publish_value(
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.speed,
+            state.speed,
+            "speed",
+            state.speed.to_string(),
+            self.retain_state,
+        );
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.opacity,
+            state.opacity,
+            "opacity",
+            state.opacity.to_string(),
+            self.retain_state,
+        );
+        self.publish_changed_value(
+            previous,
+            |snapshot| snapshot.live_when_muted,
+            state.live_when_muted,
             "live_when_muted",
             if state.live_when_muted { "ON" } else { "OFF" },
             self.retain_state,
         );
+    }
+
+    fn publish_status<V: Into<Vec<u8>>>(&self, value: V) {
+        if let Err(error) = self
+            .client
+            .publish(self.topics.availability(), self.qos, true, value)
+        {
+            log_event(
+                "warn",
+                "mqtt.publish.error",
+                &[("message", error.to_string())],
+            );
+        }
+    }
+
+    fn publish_changed_value<T, F, V>(
+        &self,
+        previous: Option<&MqttStateSnapshot>,
+        previous_value: F,
+        current_value: T,
+        key: &str,
+        value: V,
+        retain: bool,
+    ) where
+        T: PartialEq,
+        F: Fn(&MqttStateSnapshot) -> T,
+        V: Into<Vec<u8>>,
+    {
+        if previous.is_some_and(|previous| previous_value(previous) == current_value) {
+            return;
+        }
+        self.publish_value(key, value, retain);
     }
 
     fn publish_value<V: Into<Vec<u8>>>(&self, key: &str, value: V, retain: bool) {
@@ -257,6 +366,30 @@ impl MqttBridge {
             );
         }
     }
+}
+
+fn mqtt_state_metadata_changed(
+    state: &MqttStateSnapshot,
+    previous: Option<&MqttStateSnapshot>,
+) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    state.available != previous.available
+        || state.device_name != previous.device_name
+        || state.device_state != previous.device_state
+        || state.muted != previous.muted
+        || state.mic_volume != previous.mic_volume
+        || state.mic_monitoring != previous.mic_monitoring
+        || state.headphone_volume != previous.headphone_volume
+        || state.polar_pattern != previous.polar_pattern
+        || state.lighting_available != previous.lighting_available
+        || state.effect != previous.effect
+        || state.target != previous.target
+        || state.brightness != previous.brightness
+        || state.speed != previous.speed
+        || state.opacity != previous.opacity
+        || state.live_when_muted != previous.live_when_muted
 }
 
 fn publish_json<T: Serialize>(client: &Client, topic: String, qos: QoS, retain: bool, value: &T) {
