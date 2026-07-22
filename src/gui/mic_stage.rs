@@ -8,6 +8,8 @@ use crate::{
 use super::{MicLiteApp, NoticeSeverity, UiNotice, is_expected_hyperx_device_name, notice_color};
 
 impl MicLiteApp {
+    const STAGE_MIC_GAP: f32 = 18.0;
+
     // Cheap change detector so the notices (and their Strings) are only rebuilt
     // when the underlying device state changes, not on every repaint.
     fn device_status_fingerprint(&self) -> u64 {
@@ -125,7 +127,7 @@ impl MicLiteApp {
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(22, 23, 23));
         let pattern_width = 160.0_f32.min(rect.width() * 0.42);
         let pattern_left = rect.right() - pattern_width - 16.0;
-        let mic_area_right = pattern_left - self.stage_mic_gap.clamp(0.0, 80.0);
+        let mic_area_right = pattern_left - Self::STAGE_MIC_GAP;
         let center = egui::pos2((rect.left() + mic_area_right) * 0.5, rect.center().y);
         let glow_radius = rect.height() * 0.36;
         for (index, color) in self.lighting.colors.iter().enumerate() {
@@ -175,25 +177,6 @@ impl MicLiteApp {
             egui::pos2(pattern_left, rect.top() + 16.0),
             egui::pos2(pattern_left + pattern_width, rect.bottom() - 16.0),
         );
-        if self.layout_edit {
-            let drag_response = ui.interact(
-                pattern_rect,
-                ui.id().with("stage_pattern_panel_drag"),
-                egui::Sense::drag(),
-            );
-            if drag_response.dragged() {
-                self.stage_pattern_left_factor = (self.stage_pattern_left_factor
-                    + drag_response.drag_delta().x / rect.width())
-                .clamp(0.20, 0.82);
-                self.save_config_snapshot();
-            }
-            painter.rect_stroke(
-                pattern_rect.expand(3.0),
-                0.0,
-                egui::Stroke::new(1.0, egui::Color32::YELLOW),
-                egui::StrokeKind::Outside,
-            );
-        }
         // Render the pattern panel positioned absolutely inside the already-allocated
         // stage rect. Using `new_child` (instead of `scope_builder`) deliberately avoids
         // advancing the parent cursor, so it does not add phantom vertical space below the

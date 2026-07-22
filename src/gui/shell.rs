@@ -18,6 +18,9 @@ use crate::{
 use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice};
 
 impl MicLiteApp {
+    const DASHBOARD_STAGE_HEIGHT: f32 = 250.0;
+    const DASHBOARD_COLUMN_GAP: f32 = 18.0;
+
     pub(super) fn ensure_tray_started(&mut self) {
         if self.tray_handle.is_none() {
             self.tray_handle = Some(TrayHandle::start());
@@ -113,13 +116,6 @@ impl MicLiteApp {
                 })
                 .response
                 .on_hover_text("Settings");
-                ui.add_space(6.0);
-                if ui.button("⟳").on_hover_text("Refresh").clicked() {
-                    self.refresh_devices();
-                }
-                if self.layout_edit {
-                    ui.label(egui::RichText::new("Layout edit").color(egui::Color32::YELLOW));
-                }
             });
         });
     }
@@ -182,6 +178,13 @@ impl MicLiteApp {
             self.open_log_terminal();
             ui.close();
         }
+        ui.separator();
+        section_label(ui, "ABOUT");
+        ui.small(format!("Version {}", env!("CARGO_PKG_VERSION")));
+        ui.small(format!(
+            "Revision {}",
+            option_env!("HYPERX_BUILD_REVISION").unwrap_or("unknown")
+        ));
     }
 
     fn export_config_action(&mut self) {
@@ -254,29 +257,6 @@ impl MicLiteApp {
         }
     }
 
-    pub(super) fn ui_layout_editor(&mut self, ui: &mut egui::Ui) {
-        if !self.layout_edit {
-            return;
-        }
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            section_label(ui, "LAYOUT");
-            ui.small(
-                "Drag the stage bottom edge, the audio/lighting splitter, and the polar panel.",
-            );
-            if ui.button("Reset").clicked() {
-                self.dashboard_stage_height = 250.0;
-                self.dashboard_audio_width = 285.0;
-                self.dashboard_lighting_width = 590.0;
-                self.dashboard_column_gap = 18.0;
-                self.stage_pattern_left_factor = 0.56;
-                self.stage_pattern_width = 235.0;
-                self.stage_mic_gap = 18.0;
-                self.save_config_snapshot();
-            }
-        });
-    }
-
     pub(super) fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
         self.drain_hid_events();
         self.drain_lighting_events();
@@ -284,65 +264,16 @@ impl MicLiteApp {
         self.refresh_status_periodic();
         self.refresh_input_peak();
         self.publish_mqtt_state_periodic();
-        let stage_height = self.dashboard_stage_height.clamp(240.0, 264.0);
-        self.ui_mic_stage(ui, stage_height);
-        if self.layout_edit {
-            let (handle_rect, drag) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), egui::Sense::drag());
-            ui.painter().rect_filled(
-                handle_rect,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(255, 255, 0, 32),
-            );
-            ui.painter().line_segment(
-                [
-                    handle_rect.center_top() + egui::vec2(12.0, 5.0),
-                    handle_rect.center_top() + egui::vec2(handle_rect.width() - 12.0, 5.0),
-                ],
-                egui::Stroke::new(1.0, egui::Color32::YELLOW),
-            );
-            if drag.dragged() {
-                self.dashboard_stage_height =
-                    (self.dashboard_stage_height + drag.drag_delta().y).clamp(240.0, 264.0);
-                self.save_config_snapshot();
-            }
-        } else {
-            ui.separator();
-        }
-        let total_width = ui.available_width().min(650.0);
-        let gap = self.dashboard_column_gap.clamp(12.0, 18.0);
-        let min_audio = 190.0;
-        let min_lighting = 340.0;
-        let max_audio = (total_width - gap - min_lighting).max(min_audio);
+        self.ui_mic_stage(ui, Self::DASHBOARD_STAGE_HEIGHT);
+        ui.separator();
+        let gap = Self::DASHBOARD_COLUMN_GAP;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.allocate_ui(egui::vec2(190.0, 320.0), |ui| {
                 self.ui_audio_panel(ui);
             });
 
-            if self.layout_edit {
-                let (split_rect, drag) =
-                    ui.allocate_exact_size(egui::vec2(gap.max(10.0), 360.0), egui::Sense::drag());
-                ui.painter().rect_filled(
-                    split_rect,
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12),
-                );
-                ui.painter().line_segment(
-                    [split_rect.center_top(), split_rect.center_bottom()],
-                    egui::Stroke::new(1.0, egui::Color32::YELLOW),
-                );
-                if drag.dragged() {
-                    let next_audio = (self.dashboard_audio_width + drag.drag_delta().x)
-                        .clamp(min_audio, max_audio);
-                    self.dashboard_audio_width = next_audio;
-                    self.dashboard_lighting_width =
-                        (total_width - next_audio - gap).max(min_lighting);
-                    self.save_config_snapshot();
-                }
-            } else {
-                ui.add_space(gap);
-            }
+            ui.add_space(gap);
 
             self.ui_lighting_panel(ui, gap);
         });

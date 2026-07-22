@@ -1,6 +1,8 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
+    emit_build_metadata();
+
     println!("cargo:rerun-if-changed=resources/hyperx_messages.mc");
     if env::var("CARGO_CFG_WINDOWS").is_err() {
         return;
@@ -59,4 +61,30 @@ fn main() {
     }
 
     println!("cargo:rustc-link-arg={}", resource_object.display());
+}
+
+fn emit_build_metadata() {
+    println!("cargo:rerun-if-env-changed=HYPERX_BUILD_REVISION");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Ok(head) = fs::read_to_string(".git/HEAD") {
+        if let Some(ref_path) = head.strip_prefix("ref: ").map(str::trim) {
+            println!("cargo:rerun-if-changed=.git/{ref_path}");
+        }
+    }
+
+    let revision = env::var("HYPERX_BUILD_REVISION")
+        .ok()
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short=12", "HEAD"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .filter(|revision| !revision.is_empty());
+
+    if let Some(revision) = revision {
+        println!("cargo:rustc-env=HYPERX_BUILD_REVISION={revision}");
+    }
 }

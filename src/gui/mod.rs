@@ -88,14 +88,6 @@ pub(crate) struct MicLiteApp {
     tray_handle: Option<TrayHandle>,
     start_minimized: bool,
     start_minimized_applied: bool,
-    layout_edit: bool,
-    stage_pattern_left_factor: f32,
-    stage_pattern_width: f32,
-    stage_mic_gap: f32,
-    dashboard_stage_height: f32,
-    dashboard_audio_width: f32,
-    dashboard_lighting_width: f32,
-    dashboard_column_gap: f32,
     window_x: Option<f32>,
     window_y: Option<f32>,
     last_window_position_save: Instant,
@@ -104,7 +96,7 @@ pub(crate) struct MicLiteApp {
 }
 
 impl MicLiteApp {
-    pub(crate) fn new(start_minimized: bool, layout_edit: bool) -> Self {
+    pub(crate) fn new(start_minimized: bool) -> Self {
         let config = load_or_create_config().unwrap_or_else(|error| {
             log_event(
                 "error",
@@ -194,14 +186,6 @@ impl MicLiteApp {
             },
             start_minimized,
             start_minimized_applied: false,
-            layout_edit,
-            stage_pattern_left_factor: config.ui.stage_pattern_left_factor,
-            stage_pattern_width: config.ui.stage_pattern_width,
-            stage_mic_gap: config.ui.stage_mic_gap,
-            dashboard_stage_height: config.ui.dashboard_stage_height,
-            dashboard_audio_width: config.ui.dashboard_audio_width,
-            dashboard_lighting_width: config.ui.dashboard_lighting_width,
-            dashboard_column_gap: config.ui.dashboard_column_gap,
             window_x: config.ui.window_x,
             window_y: config.ui.window_y,
             last_window_position_save: Instant::now(),
@@ -268,13 +252,6 @@ impl MicLiteApp {
                 window_y: self.window_y,
                 minimize_to_tray: self.minimize_to_tray,
                 last_polar_pattern: self.polar_pattern.as_config().to_string(),
-                stage_pattern_left_factor: self.stage_pattern_left_factor,
-                stage_pattern_width: self.stage_pattern_width,
-                stage_mic_gap: self.stage_mic_gap,
-                dashboard_stage_height: self.dashboard_stage_height,
-                dashboard_audio_width: self.dashboard_audio_width,
-                dashboard_lighting_width: self.dashboard_lighting_width,
-                dashboard_column_gap: self.dashboard_column_gap,
             },
             service: stored.service,
             device: stored.device,
@@ -373,7 +350,6 @@ impl eframe::App for MicLiteApp {
                 ui.set_max_width(inner_width);
                 ui.add_space(8.0);
                 self.ui_top_bar(ui);
-                self.ui_layout_editor(ui);
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);

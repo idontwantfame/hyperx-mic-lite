@@ -29,14 +29,7 @@
     "window_width": 1120.0,
     "window_height": 760.0,
     "minimize_to_tray": true,
-    "last_polar_pattern": "stereo",
-    "stage_pattern_left_factor": 0.56,
-    "stage_pattern_width": 235.0,
-    "stage_mic_gap": 18.0,
-    "dashboard_stage_height": 250.0,
-    "dashboard_audio_width": 285.0,
-    "dashboard_lighting_width": 590.0,
-    "dashboard_column_gap": 18.0
+    "last_polar_pattern": "stereo"
   },
   "service": {
     "enabled": false,

@@ -67,34 +67,6 @@ fn default_last_polar_pattern() -> String {
     "unknown".to_string()
 }
 
-fn default_stage_pattern_left_factor() -> f32 {
-    0.56
-}
-
-fn default_stage_pattern_width() -> f32 {
-    235.0
-}
-
-fn default_stage_mic_gap() -> f32 {
-    18.0
-}
-
-fn default_dashboard_stage_height() -> f32 {
-    250.0
-}
-
-fn default_dashboard_audio_width() -> f32 {
-    285.0
-}
-
-fn default_dashboard_lighting_width() -> f32 {
-    590.0
-}
-
-fn default_dashboard_column_gap() -> f32 {
-    18.0
-}
-
 fn default_mqtt_url() -> String {
     "mqtt://localhost:1883".to_string()
 }
@@ -175,20 +147,6 @@ pub(crate) struct UiConfig {
     pub(crate) minimize_to_tray: bool,
     #[serde(default = "default_last_polar_pattern")]
     pub(crate) last_polar_pattern: String,
-    #[serde(default = "default_stage_pattern_left_factor")]
-    pub(crate) stage_pattern_left_factor: f32,
-    #[serde(default = "default_stage_pattern_width")]
-    pub(crate) stage_pattern_width: f32,
-    #[serde(default = "default_stage_mic_gap")]
-    pub(crate) stage_mic_gap: f32,
-    #[serde(default = "default_dashboard_stage_height")]
-    pub(crate) dashboard_stage_height: f32,
-    #[serde(default = "default_dashboard_audio_width")]
-    pub(crate) dashboard_audio_width: f32,
-    #[serde(default = "default_dashboard_lighting_width")]
-    pub(crate) dashboard_lighting_width: f32,
-    #[serde(default = "default_dashboard_column_gap")]
-    pub(crate) dashboard_column_gap: f32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -294,13 +252,6 @@ impl Default for AppConfig {
                 window_y: None,
                 minimize_to_tray: true,
                 last_polar_pattern: "unknown".to_string(),
-                stage_pattern_left_factor: default_stage_pattern_left_factor(),
-                stage_pattern_width: default_stage_pattern_width(),
-                stage_mic_gap: default_stage_mic_gap(),
-                dashboard_stage_height: default_dashboard_stage_height(),
-                dashboard_audio_width: default_dashboard_audio_width(),
-                dashboard_lighting_width: default_dashboard_lighting_width(),
-                dashboard_column_gap: default_dashboard_column_gap(),
             },
             service: ServiceConfig {
                 enabled: false,
@@ -367,27 +318,6 @@ impl AppConfig {
         }
         validate_optional_window_position("ui.window_x", self.ui.window_x)?;
         validate_optional_window_position("ui.window_y", self.ui.window_y)?;
-        if !(0.20..=0.82).contains(&self.ui.stage_pattern_left_factor) {
-            return Err("ui.stage_pattern_left_factor must be 0.20..0.82.".to_string());
-        }
-        if !(180.0..=340.0).contains(&self.ui.stage_pattern_width) {
-            return Err("ui.stage_pattern_width must be 180..340.".to_string());
-        }
-        if !(0.0..=80.0).contains(&self.ui.stage_mic_gap) {
-            return Err("ui.stage_mic_gap must be 0..80.".to_string());
-        }
-        if !(180.0..=360.0).contains(&self.ui.dashboard_stage_height) {
-            return Err("ui.dashboard_stage_height must be 180..360.".to_string());
-        }
-        if !(220.0..=360.0).contains(&self.ui.dashboard_audio_width) {
-            return Err("ui.dashboard_audio_width must be 220..360.".to_string());
-        }
-        if !(360.0..=760.0).contains(&self.ui.dashboard_lighting_width) {
-            return Err("ui.dashboard_lighting_width must be 360..760.".to_string());
-        }
-        if !(0.0..=40.0).contains(&self.ui.dashboard_column_gap) {
-            return Err("ui.dashboard_column_gap must be 0..40.".to_string());
-        }
         validate_topic_prefix("mqtt.base_topic", &self.mqtt.base_topic)?;
         validate_topic_prefix("mqtt.discovery_prefix", &self.mqtt.discovery_prefix)?;
         if self.mqtt.client_id.trim().is_empty() {
