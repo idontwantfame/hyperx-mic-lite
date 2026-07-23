@@ -60,7 +60,7 @@ pub(crate) fn export_diagnostics_bundle(destination: &Path) -> Result<(), String
     let manifest = serde_json::json!({
         "schema_version": 1,
         "app": APP_NAME,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("HYPERX_BUILD_VERSION"),
         "generated_at": log_timestamp(),
         "binary": env::current_exe().map(|path| path.display().to_string()).unwrap_or_default(),
         "config_path": config_path().display().to_string(),

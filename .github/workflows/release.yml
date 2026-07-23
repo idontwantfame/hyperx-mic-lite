@@ -6,10 +6,6 @@ on:
       - .github/workflows/release.yml
   workflow_dispatch:
     inputs:
-      version:
-        description: Semantic version to release, for example 0.2.0
-        required: true
-        type: string
       prerelease:
         description: Mark the GitHub release as prerelease
         required: true
@@ -45,27 +41,43 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate Version
+      - name: Resolve Version
+        id: version
         shell: pwsh
         run: |
-          $version = "${{ inputs.version }}"
-          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') {
-            throw "Version '$version' is not SemVer. Use values like 0.2.0 or 1.0.0-beta.1."
+          $toml = Get-Content Cargo.toml -Raw
+          if ($toml -notmatch '(?m)^version = "([^"]+)"$') {
+            throw "Cargo.toml does not contain a package version."
           }
+          $snapshotVersion = $Matches[1]
+          if ($snapshotVersion -notmatch '^(\d+)\.(\d+)\.(\d+)-SNAPSHOT$') {
+            throw "Cargo.toml version '$snapshotVersion' is not a release snapshot. Use values like 1.1.2-SNAPSHOT."
+          }
+
+          $major = [int]$Matches[1]
+          $minor = [int]$Matches[2]
+          $patch = [int]$Matches[3]
+          $version = "$major.$minor.$patch"
+          $nextVersion = "$major.$minor.$($patch + 1)-SNAPSHOT"
+
           $existingTag = git tag --list "v$version"
           if ($existingTag) {
             throw "Tag v$version already exists."
           }
+
+          "release_version=$version" >> $env:GITHUB_OUTPUT
+          "next_snapshot_version=$nextVersion" >> $env:GITHUB_OUTPUT
+          "HYPERX_BUILD_VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
 
-      - name: Bump Cargo Version
+      - name: Set Release Version
         shell: pwsh
         run: |
-          $version = "${{ inputs.version }}"
+          $version = "${{ steps.version.outputs.release_version }}"
           $toml = Get-Content Cargo.toml -Raw
           $toml = $toml -replace '(?m)^version = ".*"$', "version = `"$version`""
           Set-Content Cargo.toml -Value $toml -NoNewline
@@ -84,7 +96,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $version = "${{ inputs.version }}"
+          $version = "${{ steps.version.outputs.release_version }}"
           $name = "hyperx-mic-lite-v$version-windows-x86_64-msvc"
           if (Test-Path "dist") { Remove-Item "dist" -Recurse -Force }
           $dist = Join-Path $PWD "dist\$name"
@@ -100,10 +112,10 @@ jobs:
           "sha=$zip.sha256" >> $env:GITHUB_OUTPUT
           "asset_name=$name.zip" >> $env:GITHUB_OUTPUT
 
-      - name: Commit Version Bump
+      - name: Commit Release Version
         shell: pwsh
         run: |
-          $version = "${{ inputs.version }}"
+          $version = "${{ steps.version.outputs.release_version }}"
           git config user.name "anonymous"
           git config user.email "anonymous@example.invalid"
           git add Cargo.toml Cargo.lock
@@ -123,11 +135,23 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
-          name: HyperX Mic Lite v${{ inputs.version }}
+          tag_name: v${{ steps.version.outputs.release_version }}
+          name: HyperX Mic Lite v${{ steps.version.outputs.release_version }}
           draft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
           files: |
             ${{ steps.package.outputs.zip }}
             ${{ steps.package.outputs.sha }}
+
+      - name: Start Next Snapshot
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.next_snapshot_version }}"
+          $toml = Get-Content Cargo.toml -Raw
+          $toml = $toml -replace '(?m)^version = ".*"$', "version = `"$version`""
+          Set-Content Cargo.toml -Value $toml -NoNewline
+          cargo check --all-targets
+          git add Cargo.toml Cargo.lock
+          git commit -m "Start v$version"
+          git push origin HEAD

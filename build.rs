@@ -64,8 +64,10 @@ fn main() {
 }
 
 fn emit_build_metadata() {
+    println!("cargo:rerun-if-env-changed=HYPERX_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=HYPERX_BUILD_REVISION");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/tags");
     if let Ok(head) = fs::read_to_string(".git/HEAD") {
         if let Some(ref_path) = head.strip_prefix("ref: ").map(str::trim) {
             println!("cargo:rerun-if-changed=.git/{ref_path}");
@@ -87,4 +89,22 @@ fn emit_build_metadata() {
     if let Some(revision) = revision {
         println!("cargo:rustc-env=HYPERX_BUILD_REVISION={revision}");
     }
+
+    let version = env::var("HYPERX_BUILD_VERSION")
+        .ok()
+        .or_else(git_tag_version)
+        .or_else(|| env::var("CARGO_PKG_VERSION").ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=HYPERX_BUILD_VERSION={version}");
+}
+
+fn git_tag_version() -> Option<String> {
+    Command::new("git")
+        .args(["describe", "--tags", "--exact-match", "--match", "v[0-9]*"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .and_then(|tag| tag.strip_prefix('v').map(str::to_string))
+        .filter(|version| !version.is_empty())
 }
