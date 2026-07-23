@@ -41,6 +41,12 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Sync Master
+        shell: pwsh
+        run: |
+          git fetch origin master
+          git checkout -B master origin/master
+
       - name: Resolve Version
         id: version
         shell: pwsh
@@ -120,8 +126,9 @@ jobs:
           git config user.email "anonymous@example.invalid"
           git add Cargo.toml Cargo.lock
           git commit -m "Release v$version"
+          git pull --rebase origin master
           git tag -a "v$version" -m "Release v$version"
-          git push origin HEAD
+          git push origin HEAD:master
           git push origin "v$version"
 
       - name: Upload Workflow Artifact
@@ -147,6 +154,7 @@ jobs:
       - name: Start Next Snapshot
         shell: pwsh
         run: |
+          git pull --rebase origin master
           $version = "${{ steps.version.outputs.next_snapshot_version }}"
           $toml = Get-Content Cargo.toml -Raw
           $toml = $toml -replace '(?m)^version\s*=\s*"[^"]+"\s*$', "version = `"$version`""
@@ -154,4 +162,5 @@ jobs:
           cargo check --all-targets
           git add Cargo.toml Cargo.lock
           git commit -m "Start v$version"
-          git push origin HEAD
+          git pull --rebase origin master
+          git push origin HEAD:master

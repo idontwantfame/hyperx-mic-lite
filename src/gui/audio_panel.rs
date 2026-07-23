@@ -7,8 +7,6 @@ use crate::{
         set_mic_volume_percent,
     },
     gui_widgets::{percent_slider, section_label},
-    lighting::detect_lighting_device,
-    logging::log_event,
 };
 
 use super::{MicLiteApp, NoticeSeverity, is_expected_hyperx_device_name, notice_color};
@@ -35,20 +33,6 @@ impl MicLiteApp {
             }
             Err(error) => self.status_error = Some(error.to_string()),
         }
-    }
-
-    pub(super) fn refresh_devices(&mut self) {
-        self.refresh_status();
-        self.lighting_device = detect_lighting_device();
-        self.lighting_notice = None;
-        log_event(
-            "info",
-            "gui.devices.refresh",
-            &[(
-                "lighting_detected",
-                self.lighting_device.is_some().to_string(),
-            )],
-        );
     }
 
     pub(super) fn refresh_status_periodic(&mut self) {
