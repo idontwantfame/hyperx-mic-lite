@@ -46,7 +46,7 @@ jobs:
         shell: pwsh
         run: |
           $toml = Get-Content Cargo.toml -Raw
-          if ($toml -notmatch '(?m)^version = "([^"]+)"$') {
+          if ($toml -notmatch '(?m)^version\s*=\s*"([^"]+)"\s*$') {
             throw "Cargo.toml does not contain a package version."
           }
           $snapshotVersion = $Matches[1]
@@ -79,7 +79,7 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.release_version }}"
           $toml = Get-Content Cargo.toml -Raw
-          $toml = $toml -replace '(?m)^version = ".*"$', "version = `"$version`""
+          $toml = $toml -replace '(?m)^version\s*=\s*"[^"]+"\s*$', "version = `"$version`""
           Set-Content Cargo.toml -Value $toml -NoNewline
           cargo check --all-targets
 
@@ -149,7 +149,7 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.next_snapshot_version }}"
           $toml = Get-Content Cargo.toml -Raw
-          $toml = $toml -replace '(?m)^version = ".*"$', "version = `"$version`""
+          $toml = $toml -replace '(?m)^version\s*=\s*"[^"]+"\s*$', "version = `"$version`""
           Set-Content Cargo.toml -Value $toml -NoNewline
           cargo check --all-targets
           git add Cargo.toml Cargo.lock
