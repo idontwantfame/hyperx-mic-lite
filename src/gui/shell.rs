@@ -180,7 +180,7 @@ impl MicLiteApp {
         }
         ui.separator();
         section_label(ui, "ABOUT");
-        ui.small(format!("Version {}", env!("CARGO_PKG_VERSION")));
+        ui.small(format!("Version {}", env!("HYPERX_BUILD_VERSION")));
         ui.small(format!(
             "Revision {}",
             option_env!("HYPERX_BUILD_REVISION").unwrap_or("unknown")

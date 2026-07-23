@@ -137,7 +137,7 @@ fn write_crash_report(message: &str, location: &str) -> Result<PathBuf, String> 
         "message": message,
         "location": location,
         "args": env::args().collect::<Vec<_>>(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("HYPERX_BUILD_VERSION"),
         "log_path": log_file_path(),
         "config_path": config_path(),
     });
