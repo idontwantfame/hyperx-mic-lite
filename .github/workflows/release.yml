@@ -6,6 +6,15 @@ on:
       - .github/workflows/release.yml
   workflow_dispatch:
     inputs:
+      next_version:
+        description: Version segment to advance after this release
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
       prerelease:
         description: Mark the GitHub release as prerelease
         required: true
@@ -64,7 +73,12 @@ jobs:
           $minor = [int]$Matches[2]
           $patch = [int]$Matches[3]
           $version = "$major.$minor.$patch"
-          $nextVersion = "$major.$minor.$($patch + 1)-SNAPSHOT"
+          $nextVersion = switch ("${{ inputs.next_version }}") {
+            "patch" { "$major.$minor.$($patch + 1)-SNAPSHOT" }
+            "minor" { "$major.$($minor + 1).0-SNAPSHOT" }
+            "major" { "$($major + 1).0.0-SNAPSHOT" }
+            default { throw "Unsupported next_version '${{ inputs.next_version }}'." }
+          }
 
           $existingTag = git tag --list "v$version"
           if ($existingTag) {
