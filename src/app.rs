@@ -176,7 +176,8 @@ Run `hyperx-mic-lite help` to show the full command list.\n"
 
 fn usage() {
     eprintln!(
-        "hyperx-mic-lite controls the default Windows microphone.\n\n\
+        "hyperx-mic-lite controls the HyperX QuadCast S. Commands that touch the microphone\n\
+fail while it is unplugged rather than acting on another input device.\n\n\
 Usage:\n\
   hyperx-mic-lite\n\
   hyperx-mic-lite list\n\

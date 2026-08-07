@@ -29,7 +29,7 @@ use windows::{
 };
 
 use crate::{
-    audio::{default_capture_info, hyperx_endpoint_info, is_quadcast_device_name},
+    audio::hyperx_endpoint_info,
     com::ComApartment,
     lighting::detect_lighting_device,
     logging::log_event,
@@ -55,8 +55,6 @@ pub(crate) struct DeviceSnapshot {
     pub(crate) render: Option<DeviceInfo>,
     /// The lighting HID interface, absent when unplugged or claimed by NGENUITY.
     pub(crate) lighting: Option<LightingDevice>,
-    /// Whichever endpoint the app's mute/volume controls currently act on.
-    pub(crate) default_capture: Option<DeviceInfo>,
 }
 
 impl DeviceSnapshot {
@@ -66,18 +64,6 @@ impl DeviceSnapshot {
     /// HID exclusively while the mic is perfectly connected and usable.
     pub(crate) fn connected(&self) -> bool {
         self.capture.is_some()
-    }
-
-    /// Whether Windows currently routes capture to the QuadCast S.
-    pub(crate) fn default_is_quadcast(&self) -> bool {
-        self.default_capture
-            .as_ref()
-            .is_some_and(|info| is_quadcast_device_name(&info.name))
-    }
-
-    /// Name of the endpoint the controls act on, for display.
-    pub(crate) fn default_capture_name(&self) -> Option<&str> {
-        self.default_capture.as_ref().map(|info| info.name.as_str())
     }
 
     fn log_fields(&self) -> Vec<(&'static str, String)> {
@@ -92,10 +78,6 @@ impl DeviceSnapshot {
             ),
             ("render", self.render.is_some().to_string()),
             ("lighting", self.lighting.is_some().to_string()),
-            (
-                "default_capture",
-                self.default_capture_name().unwrap_or("none").to_string(),
-            ),
         ]
     }
 }
@@ -244,12 +226,16 @@ pub(crate) fn probe() -> DeviceSnapshot {
     probe_devices()
 }
 
+/// Sample QuadCast S presence.
+///
+/// Every field is scoped to the QuadCast S. Nothing here describes any other microphone, so
+/// plugging a webcam or a second USB mic in or out leaves the snapshot byte-identical and
+/// raises no event — the app has no business reacting to hardware it does not control.
 fn probe_devices() -> DeviceSnapshot {
     DeviceSnapshot {
         capture: hyperx_endpoint_info(eCapture).unwrap_or_default(),
         render: hyperx_endpoint_info(eRender).unwrap_or_default(),
         lighting: detect_lighting_device(),
-        default_capture: default_capture_info(),
     }
 }
 
@@ -368,7 +354,18 @@ mod tests {
             capture: Some(endpoint("Microphone (HyperX QuadCast S)")),
             render: Some(endpoint("Headphones (HyperX QuadCast S)")),
             lighting: None,
-            default_capture: Some(endpoint("Microphone (HyperX QuadCast S)")),
+        }
+    }
+
+    fn lighting_device() -> LightingDevice {
+        LightingDevice {
+            vendor_id: 0x0951,
+            product_id: 0x171f,
+            interface_number: 0,
+            usage_page: 0xff90,
+            usage: 0xff00,
+            manufacturer: "HyperX".to_string(),
+            product: "QuadCast S".to_string(),
         }
     }
 
@@ -403,42 +400,42 @@ mod tests {
     }
 
     #[test]
-    fn default_endpoint_moving_away_reports_changed_not_disconnected() {
+    fn lighting_interface_being_claimed_reports_changed() {
         let mut current = connected_snapshot();
-        current.default_capture = Some(endpoint("Microphone (Webcam)"));
-        let event = classify_transition(Some(&connected_snapshot()), &current);
+        current.lighting = None;
+        let mut previous = connected_snapshot();
+        previous.lighting = Some(lighting_device());
+        let event = classify_transition(Some(&previous), &current);
         assert!(matches!(event, Some(DeviceEvent::Changed(_))));
     }
 
     #[test]
     fn lighting_interface_appearing_reports_changed() {
         let mut current = connected_snapshot();
-        current.lighting = Some(LightingDevice {
-            vendor_id: 0x0951,
-            product_id: 0x171f,
-            interface_number: 0,
-            usage_page: 0xff90,
-            usage: 0xff00,
-            manufacturer: "HyperX".to_string(),
-            product: "QuadCast S".to_string(),
-        });
+        current.lighting = Some(lighting_device());
         let event = classify_transition(Some(&connected_snapshot()), &current);
         assert!(matches!(event, Some(DeviceEvent::Changed(_))));
     }
 
     #[test]
-    fn unplugged_endpoint_left_as_default_is_not_treated_as_connected() {
-        // Windows keeps a stale default pointing at the mic for a moment after removal; only
-        // an active capture endpoint counts as connected.
-        let snapshot = DeviceSnapshot {
+    fn presence_is_keyed_on_the_capture_endpoint_alone() {
+        // NGENUITY can hold the HID exclusively while the mic works fine, and the HID can
+        // linger a moment after the cable is pulled; only an active capture endpoint counts.
+        let claimed_hid = DeviceSnapshot {
+            capture: Some(endpoint("Microphone (HyperX QuadCast S)")),
+            render: Some(endpoint("Headphones (HyperX QuadCast S)")),
+            lighting: None,
+        };
+        assert!(claimed_hid.connected());
+
+        let lingering_hid = DeviceSnapshot {
             capture: None,
             render: None,
-            lighting: None,
-            default_capture: Some(endpoint("Microphone (HyperX QuadCast S)")),
+            lighting: Some(lighting_device()),
         };
-        assert!(!snapshot.connected());
+        assert!(!lingering_hid.connected());
         assert!(matches!(
-            classify_transition(Some(&connected_snapshot()), &snapshot),
+            classify_transition(Some(&connected_snapshot()), &lingering_hid),
             Some(DeviceEvent::Disconnected(_))
         ));
     }

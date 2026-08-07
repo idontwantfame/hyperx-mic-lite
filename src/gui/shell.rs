@@ -265,6 +265,7 @@ impl MicLiteApp {
         self.drain_lighting_events();
         self.drain_mqtt_commands();
         self.refresh_status_periodic();
+        self.ensure_input_monitor();
         self.refresh_input_peak();
         self.publish_mqtt_state_periodic();
         self.ui_mic_stage(ui, Self::DASHBOARD_STAGE_HEIGHT);

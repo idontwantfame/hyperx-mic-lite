@@ -9,7 +9,7 @@ use crate::{
     gui_widgets::{percent_slider, section_label},
 };
 
-use super::{MicLiteApp, NoticeSeverity, is_expected_hyperx_device_name, notice_color};
+use super::MicLiteApp;
 
 impl MicLiteApp {
     pub(super) fn refresh_input_peak(&mut self) {
@@ -17,10 +17,19 @@ impl MicLiteApp {
             return;
         }
         self.last_peak_update = Instant::now();
-        if let Some(monitor) = &self.input_monitor {
-            self.input_peak = monitor.peak().clamp(0.0, 1.0);
-        } else if let Ok(peak) = input_peak_value() {
-            self.input_peak = peak.clamp(0.0, 1.0);
+        // A failed stream keeps reporting its last sample, so fall through to the endpoint
+        // meter rather than showing a frozen level until the retry reopens the stream.
+        match self
+            .input_monitor
+            .as_ref()
+            .filter(|_| self.input_monitor_alive())
+        {
+            Some(monitor) => self.input_peak = monitor.peak().clamp(0.0, 1.0),
+            None => {
+                if let Ok(peak) = input_peak_value() {
+                    self.input_peak = peak.clamp(0.0, 1.0);
+                }
+            }
         }
     }
 
@@ -132,16 +141,6 @@ impl MicLiteApp {
                 if let Some(error) = &self.status_error {
                     ui.add_space(8.0);
                     ui.colored_label(egui::Color32::from_rgb(255, 120, 120), error);
-                } else if self
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| !is_expected_hyperx_device_name(&status.device.name))
-                {
-                    ui.add_space(8.0);
-                    ui.colored_label(
-                        notice_color(NoticeSeverity::Warning),
-                        "Controls target the current Windows default input.",
-                    );
                 }
             });
         });

@@ -21,7 +21,7 @@ impl MicLiteApp {
             .hash(&mut hasher);
         self.status_error.hash(&mut hasher);
         self.lighting_device.is_none().hash(&mut hasher);
-        self.input_monitor.is_none().hash(&mut hasher);
+        self.input_monitor_alive().hash(&mut hasher);
         // One counter stands in for the whole snapshot, which is not itself hashable.
         self.device_generation.hash(&mut hasher);
         hasher.finish()
@@ -44,15 +44,9 @@ impl MicLiteApp {
                     severity: NoticeSeverity::Error,
                     message: "QuadCast S disconnected. Reconnect the USB cable.".to_string(),
                 },
-                match self.devices.default_capture_name() {
-                    Some(name) => UiNotice {
-                        severity: NoticeSeverity::Info,
-                        message: format!("Controls now target {name}."),
-                    },
-                    None => UiNotice {
-                        severity: NoticeSeverity::Warning,
-                        message: "No capture device is available.".to_string(),
-                    },
+                UiNotice {
+                    severity: NoticeSeverity::Info,
+                    message: "Controls stay idle until it is back.".to_string(),
                 },
             ];
         }
@@ -66,14 +60,6 @@ impl MicLiteApp {
                         message: format!(
                             "Microphone is {}: {}",
                             status.device.state, status.device.name
-                        ),
-                    });
-                } else if !self.devices.default_is_quadcast() {
-                    notices.push(UiNotice {
-                        severity: NoticeSeverity::Warning,
-                        message: format!(
-                            "QuadCast S is connected but not the default input: {}",
-                            status.device.name
                         ),
                     });
                 }
@@ -96,12 +82,10 @@ impl MicLiteApp {
             });
         }
 
-        if self.input_monitor.is_none() {
+        if !self.input_monitor_alive() {
             notices.push(UiNotice {
                 severity: NoticeSeverity::Warning,
-                message:
-                    "Input meter unavailable; capture level monitoring is unsupported or busy."
-                        .to_string(),
+                message: "Input meter unavailable; retrying.".to_string(),
             });
         }
 

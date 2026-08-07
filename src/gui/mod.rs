@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    audio::{AudioPeakMonitor, is_quadcast_device_name, start_audio_peak_monitor_with},
+    audio::{AudioPeakMonitor, start_audio_peak_monitor_with},
     config::{
         AppConfig, AudioConfig, LightingConfig, MqttConfig, UiConfig, load_or_create_config,
         save_config,
@@ -65,6 +65,11 @@ pub(crate) struct MicLiteApp {
     /// separately from `input_monitor` so the monitor can be rebuilt on a replug without
     /// orphaning a lighting stream that already holds a clone.
     input_peak_bits: Arc<AtomicU32>,
+    /// When the capture stream was last opened, so a failed attempt is retried rather than
+    /// leaving the meter dead for the rest of the session.
+    last_input_monitor_attempt: Instant,
+    /// Reason the last attempt failed, kept only to avoid logging the same line on every retry.
+    input_monitor_error: Option<String>,
     last_peak_update: Instant,
     last_status_update: Instant,
     polar_pattern: PolarPattern,
@@ -151,6 +156,8 @@ impl MicLiteApp {
                 }
             },
             input_peak_bits,
+            last_input_monitor_attempt: Instant::now(),
+            input_monitor_error: None,
             last_peak_update: Instant::now(),
             last_status_update: Instant::now(),
             polar_pattern: PolarPattern::from_config(&config.ui.last_polar_pattern),
@@ -288,10 +295,6 @@ impl MicLiteApp {
     fn is_muted(&self) -> bool {
         self.status.as_ref().is_some_and(|status| status.muted) || self.hid_muted
     }
-}
-
-fn is_expected_hyperx_device_name(name: &str) -> bool {
-    is_quadcast_device_name(name)
 }
 
 fn notice_color(severity: NoticeSeverity) -> egui::Color32 {

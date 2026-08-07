@@ -3,7 +3,7 @@ use std::{
     process,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
 };
 
@@ -32,12 +32,20 @@ use crate::{
 };
 pub(crate) struct AudioPeakMonitor {
     peak_bits: Arc<AtomicU32>,
+    /// Raised by the cpal error callback. A dead stream keeps returning its last sample
+    /// forever, so the owner needs a way to tell "silent" from "broken" and rebuild.
+    failed: Arc<AtomicBool>,
     _stream: cpal::Stream,
 }
 
 impl AudioPeakMonitor {
     pub(crate) fn peak(&self) -> f32 {
         peak_from_bits(&self.peak_bits)
+    }
+
+    /// Whether the capture stream has reported an unrecoverable error.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
     }
 }
 
@@ -227,7 +235,7 @@ pub(crate) fn set_mic_mute(muted: bool) -> WinResult<()> {
     // SAFETY: the IAudioEndpointVolume comes from Activate on a live device; SetMute
     // documents the event-context GUID pointer as optional, so null is allowed.
     let result =
-        unsafe { endpoint_volume(&default_capture_device()?)?.SetMute(muted, std::ptr::null()) };
+        unsafe { endpoint_volume(&hyperx_capture_device()?)?.SetMute(muted, std::ptr::null()) };
     if result.is_ok() {
         log_event("info", "audio.mute.set", &[("muted", muted.to_string())]);
     }
@@ -235,7 +243,7 @@ pub(crate) fn set_mic_mute(muted: bool) -> WinResult<()> {
 }
 
 pub(crate) fn toggle_mic_mute() -> WinResult<()> {
-    let volume = endpoint_volume(&default_capture_device()?)?;
+    let volume = endpoint_volume(&hyperx_capture_device()?)?;
     // SAFETY: volume is a live IAudioEndpointVolume obtained above; GetMute only writes
     // its BOOL out-param.
     let muted = unsafe { volume.GetMute()?.as_bool() };
@@ -248,7 +256,7 @@ pub(crate) fn set_mic_volume_percent(percent: u8) -> WinResult<()> {
     // SAFETY: the IAudioEndpointVolume comes from Activate on a live device;
     // SetMasterVolumeLevelScalar allows a null event-context GUID.
     let result = unsafe {
-        endpoint_volume(&default_capture_device()?)?
+        endpoint_volume(&hyperx_capture_device()?)?
             .SetMasterVolumeLevelScalar(percent as f32 / 100.0, std::ptr::null())
     };
     if result.is_ok() {
@@ -403,18 +411,33 @@ pub(crate) fn is_quadcast_device_name(name: &str) -> bool {
     name.contains("hyperx") || name.contains("quadcast") || name.contains("kingston")
 }
 
+/// Error returned when the QuadCast S is not plugged in.
+///
+/// Every control in this module acts on the QuadCast S specifically. When it is absent the
+/// honest answer is a failure, not a silent redirect: falling back to whatever endpoint
+/// Windows promoted to default meant the mute button, the volume slider and the reported
+/// status all quietly started driving an unrelated microphone.
+fn quadcast_not_connected() -> Error {
+    Error::new(
+        HRESULT(0x80070490u32 as i32),
+        "HyperX QuadCast S is not connected",
+    )
+}
+
 fn hyperx_render_device() -> WinResult<IMMDevice> {
     hyperx_audio_device(eRender)
 }
 
+/// The QuadCast S capture endpoint.
+pub(crate) fn hyperx_capture_device() -> WinResult<IMMDevice> {
+    hyperx_audio_device(eCapture)
+}
+
 fn hyperx_audio_device(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<IMMDevice> {
     let enumerator = device_enumerator()?;
-    match find_hyperx_endpoint(&enumerator, flow)? {
-        Some((device, _)) => Ok(device),
-        // SAFETY: enumerator is still the valid IMMDeviceEnumerator created above; the method
-        // returns an owned IMMDevice on success.
-        None => unsafe { enumerator.GetDefaultAudioEndpoint(flow, eCommunications) },
-    }
+    find_hyperx_endpoint(&enumerator, flow)?
+        .map(|(device, _)| device)
+        .ok_or_else(quadcast_not_connected)
 }
 
 /// Locate the QuadCast S endpoint for `flow`, considering only endpoints Windows reports
@@ -451,14 +474,6 @@ pub(crate) fn hyperx_endpoint_info(
 ) -> WinResult<Option<DeviceInfo>> {
     let enumerator = device_enumerator()?;
     Ok(find_hyperx_endpoint(&enumerator, flow)?.map(|(_, info)| info))
-}
-
-/// Describe the endpoint the app's controls currently target, whatever device that is.
-pub(crate) fn default_capture_info() -> Option<DeviceInfo> {
-    let device = default_capture_device().ok()?;
-    let mut info = describe_device(&device).ok()?;
-    info.is_default = true;
-    Some(info)
 }
 
 fn print_audio_topology(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<()> {
@@ -621,15 +636,34 @@ fn print_topology_part(
 }
 
 pub(crate) fn input_peak_value() -> WinResult<f32> {
-    let device = default_capture_device()?;
+    let device = hyperx_capture_device()?;
     let meter = endpoint_meter(&device)?;
-    // SAFETY: meter is a live IAudioMeterInformation activated for the default capture
-    // device; GetPeakValue only writes its f32 out-param.
+    // SAFETY: meter is a live IAudioMeterInformation activated for the QuadCast S capture
+    // endpoint; GetPeakValue only writes its f32 out-param.
     unsafe { meter.GetPeakValue() }
 }
 
 pub(crate) fn start_audio_peak_monitor() -> Result<AudioPeakMonitor, String> {
     start_audio_peak_monitor_with(Arc::new(AtomicU32::new(0.0f32.to_bits())))
+}
+
+/// Locate the QuadCast S among cpal's capture devices.
+///
+/// Deliberately not `default_input_device()`, for two observed reasons. That handle follows
+/// whatever Windows has promoted to default, so the meter read a foreign microphone whenever
+/// the QuadCast S was not the default, and cpal tore the stream down with "Default audio
+/// device changed" on every replug. It also activates through `ActivateAudioInterfaceAsync`
+/// rather than `IMMDevice::Activate`, and reopening it in the moments after a replug failed
+/// intermittently with RPC_E_CHANGED_MODE; the exact trigger was never pinned down, but a
+/// concrete device does not use that code path at all.
+fn quadcast_input_device() -> Result<cpal::Device, String> {
+    cpal::default_host()
+        .input_devices()
+        .map_err(|error| error.to_string())?
+        // cpal exposes the endpoint's friendly name through `Display`, the same string the
+        // WASAPI enumeration in this module matches on.
+        .find(|device| is_quadcast_device_name(&device.to_string()))
+        .ok_or_else(|| "HyperX QuadCast S is not available as a capture device.".to_string())
 }
 
 /// Build a peak monitor that publishes into an existing `peak_bits` cell.
@@ -640,62 +674,50 @@ pub(crate) fn start_audio_peak_monitor() -> Result<AudioPeakMonitor, String> {
 pub(crate) fn start_audio_peak_monitor_with(
     peak_bits: Arc<AtomicU32>,
 ) -> Result<AudioPeakMonitor, String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "No default input device is available.".to_string())?;
+    let device = quadcast_input_device()?;
     let config = device
         .default_input_config()
         .map_err(|error| error.to_string())?;
     let channels = config.channels() as usize;
     let stream_config: cpal::StreamConfig = config.clone().into();
     peak_bits.store(0.0f32.to_bits(), Ordering::Relaxed);
+    let failed = Arc::new(AtomicBool::new(false));
 
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => {
-            build_peak_stream::<f32>(&device, stream_config.clone(), channels, peak_bits.clone())
+    let build = |sample_format| {
+        let args = (
+            stream_config.clone(),
+            channels,
+            peak_bits.clone(),
+            failed.clone(),
+        );
+        match sample_format {
+            cpal::SampleFormat::F32 => build_peak_stream::<f32>(&device, args),
+            cpal::SampleFormat::F64 => build_peak_stream::<f64>(&device, args),
+            cpal::SampleFormat::I8 => build_peak_stream::<i8>(&device, args),
+            cpal::SampleFormat::I16 => build_peak_stream::<i16>(&device, args),
+            cpal::SampleFormat::I32 => build_peak_stream::<i32>(&device, args),
+            cpal::SampleFormat::I64 => build_peak_stream::<i64>(&device, args),
+            cpal::SampleFormat::U8 => build_peak_stream::<u8>(&device, args),
+            cpal::SampleFormat::U16 => build_peak_stream::<u16>(&device, args),
+            cpal::SampleFormat::U32 => build_peak_stream::<u32>(&device, args),
+            cpal::SampleFormat::U64 => build_peak_stream::<u64>(&device, args),
+            other => Err(format!("Unsupported input sample format: {other:?}")),
         }
-        cpal::SampleFormat::F64 => {
-            build_peak_stream::<f64>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::I8 => {
-            build_peak_stream::<i8>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::I16 => {
-            build_peak_stream::<i16>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::I32 => {
-            build_peak_stream::<i32>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::I64 => {
-            build_peak_stream::<i64>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::U8 => {
-            build_peak_stream::<u8>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::U16 => {
-            build_peak_stream::<u16>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::U32 => {
-            build_peak_stream::<u32>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        cpal::SampleFormat::U64 => {
-            build_peak_stream::<u64>(&device, stream_config.clone(), channels, peak_bits.clone())
-        }
-        other => Err(format!("Unsupported input sample format: {other:?}")),
-    }?;
+    };
+    let stream = build(config.sample_format())?;
     stream.play().map_err(|error| error.to_string())?;
     Ok(AudioPeakMonitor {
         peak_bits,
+        failed,
         _stream: stream,
     })
 }
 
+type PeakStreamArgs = (cpal::StreamConfig, usize, Arc<AtomicU32>, Arc<AtomicBool>);
+
 fn build_peak_stream<T>(
     device: &cpal::Device,
-    config: cpal::StreamConfig,
-    channels: usize,
-    peak_bits: Arc<AtomicU32>,
+    (config, channels, peak_bits, failed): PeakStreamArgs,
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::Sample + cpal::SizedSample + ToPeakSample + Send + 'static,
@@ -704,7 +726,10 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _| update_peak_from_samples(data, channels, &peak_bits),
-            |error| {
+            move |error| {
+                // cpal never revives a stream it has errored, so record the death: the owner
+                // polls this to rebuild instead of showing a meter frozen at its last sample.
+                failed.store(true, Ordering::Relaxed);
                 log_event(
                     "warn",
                     "audio.capture.stream.error",
@@ -795,9 +820,12 @@ impl ToPeakSample for u64 {
 }
 
 pub(crate) fn mic_status() -> WinResult<MicStatus> {
-    let device = default_capture_device()?;
+    let device = hyperx_capture_device()?;
+    let enumerator = device_enumerator()?;
     let mut info = describe_device(&device)?;
-    info.is_default = true;
+    info.is_default = default_capture_device_with(&enumerator)
+        .and_then(|default| device_id_string(&default))
+        .is_ok_and(|default_id| default_id == info.id);
 
     let volume = endpoint_volume(&device)?;
     // SAFETY: volume is a live IAudioEndpointVolume obtained above; the getter only writes
@@ -837,10 +865,6 @@ pub(crate) fn list_capture_devices() -> WinResult<Vec<DeviceInfo>> {
     }
 
     Ok(devices)
-}
-
-fn default_capture_device() -> WinResult<IMMDevice> {
-    default_capture_device_with(&device_enumerator()?)
 }
 
 fn default_capture_device_with(enumerator: &IMMDeviceEnumerator) -> WinResult<IMMDevice> {
@@ -979,4 +1003,71 @@ fn json_escape(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quadcast_vendor_spellings_are_matched() {
+        for name in [
+            "Microphone (HyperX QuadCast S)",
+            "Headphones (HyperX QuadCast S)",
+            "Microphone (Kingston HyperX QuadCast S)",
+            "microphone (quadcast s)",
+        ] {
+            assert!(is_quadcast_device_name(name), "expected {name} to match");
+        }
+    }
+
+    /// Hardware check: the capture meter must open against the QuadCast S itself, repeatedly.
+    ///
+    /// Ignored by default because it needs the mic plugged in. Run with
+    /// `cargo test -- --ignored quadcast_capture_stream_opens_repeatedly --nocapture`.
+    #[test]
+    #[ignore = "requires a connected HyperX QuadCast S"]
+    fn quadcast_capture_stream_opens_repeatedly() {
+        let _com = crate::com::ComApartment::init().expect("COM init");
+        let device = quadcast_input_device().unwrap_or_else(|error| {
+            // Worth naming what was there instead: inside an RDP session Windows replaces the
+            // physical endpoints with "Remote Audio" and the mic is genuinely unreachable.
+            let seen = cpal::default_host()
+                .input_devices()
+                .map(|devices| devices.map(|d| d.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            panic!("{error} capture devices visible to this session: {seen:?}")
+        });
+        println!("resolved capture device: {device}");
+        assert!(is_quadcast_device_name(&device.to_string()));
+
+        // Open, drop, reopen: a replug drives exactly this cycle, and the previous
+        // default-device handle is what failed partway through it.
+        for attempt in 1..=3 {
+            let monitor = start_audio_peak_monitor().unwrap_or_else(|error| {
+                panic!("attempt {attempt} failed to open the capture stream: {error}")
+            });
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            assert!(!monitor.failed(), "attempt {attempt} errored the stream");
+            println!("attempt {attempt}: peak={:.4}", monitor.peak());
+        }
+    }
+
+    #[test]
+    fn foreign_microphones_are_not_matched() {
+        // Every one of these has been the Windows default at some point on the dev machine;
+        // the app must not treat any of them as the QuadCast S.
+        for name in [
+            "Microphone (Creative Pebble X Plus)",
+            "Microphone (Realtek(R) Audio)",
+            "Microphone (USB Webcam)",
+            "Line In (High Definition Audio Device)",
+            "Unknown microphone",
+        ] {
+            assert!(
+                !is_quadcast_device_name(name),
+                "expected {name} not to match"
+            );
+        }
+    }
 }
