@@ -258,6 +258,9 @@ impl MicLiteApp {
     }
 
     pub(super) fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
+        // First: a connect or disconnect invalidates the status, capture stream and HID
+        // handles that everything below reads.
+        self.drain_device_events();
         self.drain_hid_events();
         self.drain_lighting_events();
         self.drain_mqtt_commands();

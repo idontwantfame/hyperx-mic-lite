@@ -659,55 +659,94 @@ fn monitor_hid_reports(duration: Duration) -> Result<(), String> {
     Ok(())
 }
 
+/// First wait before re-looking for the lighting HID after it could not be opened.
+const HID_RETRY_MIN: Duration = Duration::from_millis(500);
+
+/// Longest wait between attempts. Reached by doubling while the mic stays unplugged, so an
+/// absent device costs one cheap enumeration every few seconds instead of a busy loop.
+const HID_RETRY_MAX: Duration = Duration::from_secs(4);
+
+/// Consecutive read failures treated as "the handle is dead" rather than a transient hiccup.
+///
+/// Unplugging the mic makes every subsequent read fail, so the listener must give the
+/// handles up and re-enumerate instead of logging the same error forever.
+const HID_READ_ERROR_LIMIT: u32 = 3;
+
+/// Why the read pump gave up on its currently open handles.
+#[derive(PartialEq)]
+enum HidPumpExit {
+    /// The handles stopped responding; re-enumerate and try to reattach.
+    DeviceLost,
+    /// The GUI dropped the receiver, so there is nobody left to notify.
+    ReceiverGone,
+}
+
+/// Watch the physical mute button and polar-pattern switch, across replugs.
+///
+/// The returned receiver stays valid for the life of the app: the worker reattaches by
+/// itself whenever the QuadCast S appears, so it also covers the case where the mic is not
+/// plugged in when the GUI starts.
 pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let api = match hidapi::HidApi::new() {
-            Ok(api) => api,
-            Err(error) => {
+        let mut retry = HID_RETRY_MIN;
+        let mut absence_logged = false;
+        loop {
+            if let Some(devices) = open_hid_event_devices() {
+                retry = HID_RETRY_MIN;
+                absence_logged = false;
                 log_event(
-                    "error",
-                    "hid.listener.init.error",
-                    &[("message", error.to_string())],
+                    "info",
+                    "hid.listener.attached",
+                    &[("interfaces", devices.len().to_string())],
                 );
-                return;
-            }
-        };
-
-        let mut devices = Vec::new();
-        for info in api
-            .device_list()
-            .filter(|device| is_supported_lighting_device(device))
-        {
-            match api.open_path(info.path()) {
-                Ok(device) => {
-                    if let Err(error) = device.set_blocking_mode(false) {
-                        log_event(
-                            "warn",
-                            "hid.listener.nonblocking.error",
-                            &[
-                                ("interface", info.interface_number().to_string()),
-                                ("usage_page", format!("{:04x}", info.usage_page())),
-                                ("usage", format!("{:04x}", info.usage())),
-                                ("message", error.to_string()),
-                            ],
-                        );
-                    }
-                    log_event(
-                        "info",
-                        "hid.listener.open",
-                        &[
-                            ("interface", info.interface_number().to_string()),
-                            ("usage_page", format!("{:04x}", info.usage_page())),
-                            ("usage", format!("{:04x}", info.usage())),
-                        ],
-                    );
-                    devices.push(device);
+                if pump_hid_events(&devices, &sender) == HidPumpExit::ReceiverGone {
+                    log_event("info", "hid.listener.stop", &[]);
+                    return;
                 }
-                Err(error) => {
+                log_event("warn", "hid.listener.detached", &[]);
+                // Retry immediately once: a lost handle is usually a replug, and the device
+                // may already be back by the time the pump unwinds.
+                continue;
+            }
+            if !absence_logged {
+                absence_logged = true;
+                log_event("info", "hid.listener.waiting", &[]);
+            }
+            thread::sleep(retry);
+            retry = (retry * 2).min(HID_RETRY_MAX);
+        }
+    });
+    receiver
+}
+
+/// Open every supported lighting HID interface, or `None` if none could be opened.
+fn open_hid_event_devices() -> Option<Vec<hidapi::HidDevice>> {
+    // A fresh context per attempt on purpose: `HidApi` caches its device list at
+    // construction, so a long-lived one would never see a mic plugged in later.
+    let api = match hidapi::HidApi::new() {
+        Ok(api) => api,
+        Err(error) => {
+            log_event(
+                "warn",
+                "hid.listener.init.error",
+                &[("message", error.to_string())],
+            );
+            return None;
+        }
+    };
+
+    let mut devices = Vec::new();
+    for info in api
+        .device_list()
+        .filter(|device| is_supported_lighting_device(device))
+    {
+        match api.open_path(info.path()) {
+            Ok(device) => {
+                if let Err(error) = device.set_blocking_mode(false) {
                     log_event(
                         "warn",
-                        "hid.listener.open.error",
+                        "hid.listener.nonblocking.error",
                         &[
                             ("interface", info.interface_number().to_string()),
                             ("usage_page", format!("{:04x}", info.usage_page())),
@@ -716,45 +755,71 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
                         ],
                     );
                 }
+                log_event(
+                    "info",
+                    "hid.listener.open",
+                    &[
+                        ("interface", info.interface_number().to_string()),
+                        ("usage_page", format!("{:04x}", info.usage_page())),
+                        ("usage", format!("{:04x}", info.usage())),
+                    ],
+                );
+                devices.push(device);
+            }
+            Err(error) => {
+                log_event(
+                    "warn",
+                    "hid.listener.open.error",
+                    &[
+                        ("interface", info.interface_number().to_string()),
+                        ("usage_page", format!("{:04x}", info.usage_page())),
+                        ("usage", format!("{:04x}", info.usage())),
+                        ("message", error.to_string()),
+                    ],
+                );
             }
         }
+    }
 
-        if devices.is_empty() {
-            log_event("warn", "hid.listener.no_devices", &[]);
-            return;
-        }
+    (!devices.is_empty()).then_some(devices)
+}
 
-        let mut buffers = vec![[0u8; 65]; devices.len()];
-        loop {
-            for (index, device) in devices.iter().enumerate() {
-                match device.read_timeout(&mut buffers[index], 10) {
-                    Ok(0) => {}
-                    Ok(count) => match decode_hid_event(&buffers[index][..count]) {
-                        Some(HidEvent::Mute(is_live)) => {
-                            log_event(
-                                "info",
-                                "hid.listener.event.mute",
-                                &[("live", is_live.to_string())],
-                            );
-                            if sender.send(HidEvent::Mute(is_live)).is_err() {
-                                log_event("info", "hid.listener.stop", &[]);
-                                return;
-                            }
-                        }
-                        Some(HidEvent::Pattern(pattern)) => {
-                            log_event(
-                                "info",
-                                "hid.listener.event.pattern",
-                                &[("pattern", pattern.label().to_string())],
-                            );
-                            if sender.send(HidEvent::Pattern(pattern)).is_err() {
-                                log_event("info", "hid.listener.stop", &[]);
-                                return;
-                            }
-                        }
-                        None => {}
-                    },
-                    Err(error) => {
+/// Forward decoded control events until the handles die or the receiver is dropped.
+fn pump_hid_events(devices: &[hidapi::HidDevice], sender: &mpsc::Sender<HidEvent>) -> HidPumpExit {
+    let mut buffers = vec![[0u8; 65]; devices.len()];
+    // Counted across the whole interface set, not per device: an unplug kills all of them at
+    // once, and one flaky interface should not by itself force a reattach.
+    let mut consecutive_errors = 0u32;
+    let mut error_logged = false;
+    loop {
+        let mut read_failed = false;
+        for (index, device) in devices.iter().enumerate() {
+            match device.read_timeout(&mut buffers[index], 10) {
+                Ok(0) => {}
+                Ok(count) => {
+                    let Some(event) = decode_hid_event(&buffers[index][..count]) else {
+                        continue;
+                    };
+                    match event {
+                        HidEvent::Mute(is_live) => log_event(
+                            "info",
+                            "hid.listener.event.mute",
+                            &[("live", is_live.to_string())],
+                        ),
+                        HidEvent::Pattern(pattern) => log_event(
+                            "info",
+                            "hid.listener.event.pattern",
+                            &[("pattern", pattern.label().to_string())],
+                        ),
+                    }
+                    if sender.send(event).is_err() {
+                        return HidPumpExit::ReceiverGone;
+                    }
+                }
+                Err(error) => {
+                    read_failed = true;
+                    if !error_logged {
+                        error_logged = true;
                         log_event(
                             "warn",
                             "hid.listener.read.error",
@@ -763,10 +828,22 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(20));
         }
-    });
-    receiver
+
+        if read_failed {
+            consecutive_errors += 1;
+            if consecutive_errors >= HID_READ_ERROR_LIMIT {
+                return HidPumpExit::DeviceLost;
+            }
+        } else {
+            // Reset on any clean sweep, including idle timeouts. Counting only failures
+            // without ever clearing them would eventually trip the limit on a healthy
+            // device that hiccupped a few times over a long session.
+            consecutive_errors = 0;
+            error_logged = false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn decode_hid_event(report: &[u8]) -> Option<HidEvent> {

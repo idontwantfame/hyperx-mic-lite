@@ -5,7 +5,7 @@ use crate::{
     model::PolarPattern,
 };
 
-use super::{MicLiteApp, NoticeSeverity, UiNotice, is_expected_hyperx_device_name, notice_color};
+use super::{MicLiteApp, NoticeSeverity, UiNotice, notice_color};
 
 impl MicLiteApp {
     const STAGE_MIC_GAP: f32 = 18.0;
@@ -22,6 +22,8 @@ impl MicLiteApp {
         self.status_error.hash(&mut hasher);
         self.lighting_device.is_none().hash(&mut hasher);
         self.input_monitor.is_none().hash(&mut hasher);
+        // One counter stands in for the whole snapshot, which is not itself hashable.
+        self.device_generation.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -34,6 +36,27 @@ impl MicLiteApp {
     }
 
     fn device_status_notices(&self) -> Vec<UiNotice> {
+        // A missing mic explains every downstream failure, so report it on its own instead
+        // of stacking the lighting and meter warnings it causes on top.
+        if !self.devices.connected() {
+            return vec![
+                UiNotice {
+                    severity: NoticeSeverity::Error,
+                    message: "QuadCast S disconnected. Reconnect the USB cable.".to_string(),
+                },
+                match self.devices.default_capture_name() {
+                    Some(name) => UiNotice {
+                        severity: NoticeSeverity::Info,
+                        message: format!("Controls now target {name}."),
+                    },
+                    None => UiNotice {
+                        severity: NoticeSeverity::Warning,
+                        message: "No capture device is available.".to_string(),
+                    },
+                },
+            ];
+        }
+
         let mut notices = Vec::new();
         match (&self.status, &self.status_error) {
             (Some(status), _) => {
@@ -45,10 +68,13 @@ impl MicLiteApp {
                             status.device.state, status.device.name
                         ),
                     });
-                } else if !is_expected_hyperx_device_name(&status.device.name) {
+                } else if !self.devices.default_is_quadcast() {
                     notices.push(UiNotice {
                         severity: NoticeSeverity::Warning,
-                        message: format!("Default input is not QuadCast S: {}", status.device.name),
+                        message: format!(
+                            "QuadCast S is connected but not the default input: {}",
+                            status.device.name
+                        ),
                     });
                 }
             }

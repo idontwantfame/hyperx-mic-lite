@@ -10,6 +10,7 @@ Lightweight Windows control software for the HyperX QuadCast S. It replaces the 
 - Microphone mute/unmute/toggle and input volume control through Windows Core Audio.
 - QuadCast S USB Audio Class topology controls for mic volume, mic monitoring, headphone volume, and mute toggles.
 - Physical mute and polar-pattern HID event monitoring.
+- Live USB connect/disconnect detection. Plugging the mic in or pulling it out is picked up while the app runs, and status, lighting HID, the input meter, and MQTT availability reattach on their own — including when the app starts with the mic unplugged.
 - Lighting writer for Solid, Wave, Cycle, Pulse, Blink, Lightning, and VU Meter effects.
 - 16-cell lighting frame rendering, top/bottom/all targets, optional split-layer effects, and explicit `Save to Mic`.
 - VU Meter lighting using direct input capture with smoothed flame-style output.

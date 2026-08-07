@@ -1,4 +1,5 @@
 mod audio_panel;
+mod device_events;
 mod lighting_panel;
 mod mic_stage;
 mod mqtt_panel;
@@ -8,23 +9,21 @@ use eframe::egui;
 use std::{
     sync::{
         Arc,
-        atomic::AtomicBool,
+        atomic::{AtomicBool, AtomicU32},
         mpsc::{self, Receiver, Sender},
     },
     time::{Duration, Instant},
 };
 
 use crate::{
-    audio::{AudioPeakMonitor, start_audio_peak_monitor},
+    audio::{AudioPeakMonitor, is_quadcast_device_name, start_audio_peak_monitor_with},
     config::{
         AppConfig, AudioConfig, LightingConfig, MqttConfig, UiConfig, load_or_create_config,
         save_config,
     },
     constants::CONFIG_SCHEMA_VERSION,
-    lighting::{
-        LightingState, color_to_hex, detect_lighting_device, parse_rgb_hex,
-        spawn_hid_event_listener,
-    },
+    devices::{DeviceSnapshot, DeviceWatcher},
+    lighting::{LightingState, color_to_hex, parse_rgb_hex, spawn_hid_event_listener},
     logging::log_event,
     model::{Effect, HidEvent, LightTarget, LightingDevice, MicStatus, PolarPattern, Tab},
     mqtt::{MqttBridge, MqttCommand, MqttStateSnapshot, start_mqtt_runtime},
@@ -62,6 +61,10 @@ pub(crate) struct MicLiteApp {
     hid_muted: bool,
     input_peak: f32,
     input_monitor: Option<AudioPeakMonitor>,
+    /// Shared with the capture stream and with any running VU Meter lighting stream. Held
+    /// separately from `input_monitor` so the monitor can be rebuilt on a replug without
+    /// orphaning a lighting stream that already holds a clone.
+    input_peak_bits: Arc<AtomicU32>,
     last_peak_update: Instant,
     last_status_update: Instant,
     polar_pattern: PolarPattern,
@@ -69,6 +72,9 @@ pub(crate) struct MicLiteApp {
     lighting: LightingState,
     lighting_device: Option<LightingDevice>,
     lighting_cancel: Option<Arc<AtomicBool>>,
+    /// Whether the user wants a lighting stream running. Survives a disconnect so the
+    /// effect resumes by itself once the mic is plugged back in.
+    lighting_stream_wanted: bool,
     lighting_events: Receiver<LightingUiEvent>,
     lighting_event_sender: Sender<LightingUiEvent>,
     lighting_notice: Option<UiNotice>,
@@ -93,6 +99,12 @@ pub(crate) struct MicLiteApp {
     last_window_position_save: Instant,
     device_notices: Vec<UiNotice>,
     device_notices_key: u64,
+    /// Background USB hotplug watcher; the single source of truth for device presence.
+    device_watcher: DeviceWatcher,
+    devices: DeviceSnapshot,
+    /// Bumped each time a new snapshot is applied, so the notice cache can invalidate
+    /// without hashing the whole snapshot.
+    device_generation: u64,
 }
 
 impl MicLiteApp {
@@ -114,6 +126,10 @@ impl MicLiteApp {
             .map(|rgb| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
             .collect::<Vec<_>>();
         let mqtt_runtime = start_mqtt_runtime(&config.mqtt);
+        // Probe once synchronously so the first frame reflects real hardware; the watcher
+        // re-reports it immediately anyway, and takes over from there.
+        let devices = crate::devices::probe();
+        let input_peak_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let mut app = Self {
             tab: Tab::from_config(&config.ui.selected_tab),
             status: None,
@@ -124,7 +140,7 @@ impl MicLiteApp {
             mute_on_app_start: config.audio.mute_on_app_start,
             hid_muted: false,
             input_peak: 0.0,
-            input_monitor: match start_audio_peak_monitor() {
+            input_monitor: match start_audio_peak_monitor_with(input_peak_bits.clone()) {
                 Ok(monitor) => {
                     log_event("info", "gui.audio.capture.start", &[]);
                     Some(monitor)
@@ -134,6 +150,7 @@ impl MicLiteApp {
                     None
                 }
             },
+            input_peak_bits,
             last_peak_update: Instant::now(),
             last_status_update: Instant::now(),
             polar_pattern: PolarPattern::from_config(&config.ui.last_polar_pattern),
@@ -161,8 +178,9 @@ impl MicLiteApp {
                 brightness: config.lighting.brightness,
                 live_when_muted: config.lighting.live_when_muted,
             },
-            lighting_device: detect_lighting_device(),
+            lighting_device: devices.lighting.clone(),
             lighting_cancel: None,
+            lighting_stream_wanted: false,
             lighting_events,
             lighting_event_sender,
             lighting_notice: None,
@@ -191,6 +209,9 @@ impl MicLiteApp {
             last_window_position_save: Instant::now(),
             device_notices: Vec::new(),
             device_notices_key: 0,
+            device_watcher: DeviceWatcher::start(),
+            devices,
+            device_generation: 0,
         };
         app.refresh_status();
         if app.mute_on_app_start {
@@ -270,8 +291,7 @@ impl MicLiteApp {
 }
 
 fn is_expected_hyperx_device_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.contains("hyperx") || name.contains("quadcast") || name.contains("kingston")
+    is_quadcast_device_name(name)
 }
 
 fn notice_color(severity: NoticeSeverity) -> egui::Color32 {
@@ -318,6 +338,11 @@ impl eframe::App for MicLiteApp {
             if self.lighting_device.is_some() {
                 self.apply_lighting_to_microphone();
                 log_event("info", "lighting.apply.autostart", &[]);
+            } else {
+                // Record the intent anyway: if the GUI started before the mic was plugged
+                // in, the effect should begin as soon as it appears.
+                self.lighting_stream_wanted = true;
+                log_event("info", "lighting.apply.autostart.deferred", &[]);
             }
         }
         if self.start_minimized && !self.start_minimized_applied {

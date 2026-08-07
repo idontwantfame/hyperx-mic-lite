@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceInfo {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -175,7 +175,7 @@ impl LightTarget {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, PartialEq, Eq)]
 pub(crate) struct LightingDevice {
     pub(crate) vendor_id: u16,
     pub(crate) product_id: u16,

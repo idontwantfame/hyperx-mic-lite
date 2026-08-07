@@ -1,5 +1,7 @@
 use windows::{
-    Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
+    Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
+    },
     core::Result as WinResult,
 };
 
@@ -14,6 +16,21 @@ impl ComApartment {
         // SAFETY: CoInitializeEx takes no pointers (reserved arg must be None); the guard is
         // only constructed when init succeeded, so every ComApartment matches one successful init.
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+        Ok(Self {
+            _not_send: std::marker::PhantomData,
+        })
+    }
+
+    /// Join the multithreaded apartment instead of creating an STA.
+    ///
+    /// `IMMNotificationClient` callbacks are delivered by the audio service on its own
+    /// thread. An STA registration would make COM marshal them back to the registering
+    /// thread, which only works if that thread pumps window messages — the device watcher
+    /// does not, so it would never see a hotplug. In the MTA the callbacks arrive directly.
+    pub(crate) fn init_multithreaded() -> WinResult<Self> {
+        // SAFETY: CoInitializeEx takes no pointers (reserved arg must be None); the guard is
+        // only constructed when init succeeded, so every ComApartment matches one successful init.
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
         Ok(Self {
             _not_send: std::marker::PhantomData,
         })

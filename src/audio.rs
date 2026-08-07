@@ -39,10 +39,6 @@ impl AudioPeakMonitor {
     pub(crate) fn peak(&self) -> f32 {
         peak_from_bits(&self.peak_bits)
     }
-
-    pub(crate) fn peak_bits(&self) -> Arc<AtomicU32> {
-        self.peak_bits.clone()
-    }
 }
 
 pub(crate) fn peak_from_bits(peak_bits: &AtomicU32) -> f32 {
@@ -398,31 +394,71 @@ fn activate_part_interface<T: Interface>(
     }
 }
 
+/// Whether an endpoint's friendly name identifies the QuadCast S.
+///
+/// Windows exposes the mic under several vendor spellings depending on the driver
+/// package, so match on any of them rather than one exact string.
+pub(crate) fn is_quadcast_device_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("hyperx") || name.contains("quadcast") || name.contains("kingston")
+}
+
 fn hyperx_render_device() -> WinResult<IMMDevice> {
     hyperx_audio_device(eRender)
 }
 
 fn hyperx_audio_device(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<IMMDevice> {
     let enumerator = device_enumerator()?;
-    // SAFETY: enumerator is a valid IMMDeviceEnumerator created just above; the returned
-    // collection is an owned IMMDeviceCollection.
-    let collection =
-        unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE(DEVICE_STATEMASK_ALL))? };
+    match find_hyperx_endpoint(&enumerator, flow)? {
+        Some((device, _)) => Ok(device),
+        // SAFETY: enumerator is still the valid IMMDeviceEnumerator created above; the method
+        // returns an owned IMMDevice on success.
+        None => unsafe { enumerator.GetDefaultAudioEndpoint(flow, eCommunications) },
+    }
+}
+
+/// Locate the QuadCast S endpoint for `flow`, considering only endpoints Windows reports
+/// as active.
+///
+/// Unplugged endpoints linger in the enumerator with `DEVICE_STATE_UNPLUGGED` for as long
+/// as the driver stays installed, so matching over `DEVICE_STATEMASK_ALL` would keep
+/// returning a dead endpoint after the USB cable is pulled and every control write against
+/// it would fail.
+fn find_hyperx_endpoint(
+    enumerator: &IMMDeviceEnumerator,
+    flow: windows::Win32::Media::Audio::EDataFlow,
+) -> WinResult<Option<(IMMDevice, DeviceInfo)>> {
+    // SAFETY: enumerator is a valid IMMDeviceEnumerator borrowed from the caller; the
+    // returned collection is an owned IMMDeviceCollection.
+    let collection = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)? };
     // SAFETY: collection is the live IMMDeviceCollection obtained above.
     let count = unsafe { collection.GetCount()? };
     for index in 0..count {
         // SAFETY: index < count reported by GetCount on this same collection.
         let device = unsafe { collection.Item(index)? };
-        let name = device_name(&device)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if name.contains("hyperx") || name.contains("quadcast") {
-            return Ok(device);
+        let name = device_name(&device).unwrap_or_default();
+        if is_quadcast_device_name(&name) {
+            let info = describe_device(&device)?;
+            return Ok(Some((device, info)));
         }
     }
-    // SAFETY: enumerator is still the valid IMMDeviceEnumerator created above; the method
-    // returns an owned IMMDevice on success.
-    unsafe { enumerator.GetDefaultAudioEndpoint(flow, eCommunications) }
+    Ok(None)
+}
+
+/// Describe the active QuadCast S endpoint for `flow`, or `None` when it is not connected.
+pub(crate) fn hyperx_endpoint_info(
+    flow: windows::Win32::Media::Audio::EDataFlow,
+) -> WinResult<Option<DeviceInfo>> {
+    let enumerator = device_enumerator()?;
+    Ok(find_hyperx_endpoint(&enumerator, flow)?.map(|(_, info)| info))
+}
+
+/// Describe the endpoint the app's controls currently target, whatever device that is.
+pub(crate) fn default_capture_info() -> Option<DeviceInfo> {
+    let device = default_capture_device().ok()?;
+    let mut info = describe_device(&device).ok()?;
+    info.is_default = true;
+    Some(info)
 }
 
 fn print_audio_topology(flow: windows::Win32::Media::Audio::EDataFlow) -> WinResult<()> {
@@ -593,6 +629,17 @@ pub(crate) fn input_peak_value() -> WinResult<f32> {
 }
 
 pub(crate) fn start_audio_peak_monitor() -> Result<AudioPeakMonitor, String> {
+    start_audio_peak_monitor_with(Arc::new(AtomicU32::new(0.0f32.to_bits())))
+}
+
+/// Build a peak monitor that publishes into an existing `peak_bits` cell.
+///
+/// The GUI rebuilds its monitor whenever the capture device changes, but a VU Meter
+/// lighting stream started earlier holds a clone of the cell. Reusing it keeps that stream
+/// fed across a replug instead of freezing it on the last sample of the old device.
+pub(crate) fn start_audio_peak_monitor_with(
+    peak_bits: Arc<AtomicU32>,
+) -> Result<AudioPeakMonitor, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -602,7 +649,7 @@ pub(crate) fn start_audio_peak_monitor() -> Result<AudioPeakMonitor, String> {
         .map_err(|error| error.to_string())?;
     let channels = config.channels() as usize;
     let stream_config: cpal::StreamConfig = config.clone().into();
-    let peak_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+    peak_bits.store(0.0f32.to_bits(), Ordering::Relaxed);
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {

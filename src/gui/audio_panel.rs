@@ -31,7 +31,14 @@ impl MicLiteApp {
                 self.status = Some(status);
                 self.status_error = None;
             }
-            Err(error) => self.status_error = Some(error.to_string()),
+            Err(error) => {
+                // Clear the old status rather than keeping it alongside the error. A stale
+                // `Some` outranks the error in every consumer (notices, the stage header,
+                // MQTT availability), which is how an unplugged mic used to keep being
+                // reported as present.
+                self.status = None;
+                self.status_error = Some(error.to_string());
+            }
         }
     }
 

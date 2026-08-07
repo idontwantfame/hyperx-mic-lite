@@ -6,6 +6,7 @@ mod com;
 mod config;
 mod config_cli;
 mod constants;
+mod devices;
 mod diagnostics;
 mod eventlog;
 mod gui;

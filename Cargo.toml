@@ -28,5 +28,8 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell_PropertiesSystem"
 ] }
+# Required in addition to `windows`: the `#[implement]` macro expands to `windows_core::`
+# paths, which only resolve when the crate is a direct dependency.
+windows-core = "0.62.2"
 windows-service = "0.8.1"
 winreg = "0.56.0"

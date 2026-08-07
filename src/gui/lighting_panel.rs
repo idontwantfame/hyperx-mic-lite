@@ -84,10 +84,13 @@ impl MicLiteApp {
             colors,
             speed: self.lighting.speed,
             brightness: self.lighting.brightness,
-            shared_peak_bits: if self.lighting.effect == Effect::VuMeter {
-                self.input_monitor
-                    .as_ref()
-                    .map(|monitor| monitor.peak_bits())
+            // Share the GUI's cell rather than the monitor's own handle, so the effect keeps
+            // reading levels after a replug rebuilds the monitor. When there is no monitor,
+            // pass None so the stream opens its own capture instead.
+            shared_peak_bits: if self.lighting.effect == Effect::VuMeter
+                && self.input_monitor.is_some()
+            {
+                Some(self.input_peak_bits.clone())
             } else {
                 None
             },
@@ -110,6 +113,7 @@ impl MicLiteApp {
         let previous_cancel = self.lighting_cancel.take();
         let cancel = Arc::new(AtomicBool::new(false));
         self.lighting_cancel = Some(cancel.clone());
+        self.lighting_stream_wanted = true;
         self.lighting_notice = Some(UiNotice {
             severity: NoticeSeverity::Info,
             message: format!("Applying {} lighting.", program.effect.label()),
@@ -314,6 +318,9 @@ impl MicLiteApp {
                                 cancel.store(true, Ordering::Relaxed);
                             }
                             self.lighting_cancel = None;
+                            // Explicit stop, so do not bring the stream back on the next
+                            // reconnect.
+                            self.lighting_stream_wanted = false;
                             log_event("info", "lighting.apply.stop", &[]);
                         }
                         if ui

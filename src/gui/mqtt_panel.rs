@@ -110,25 +110,28 @@ impl MicLiteApp {
         let Some(bridge) = &self.mqtt_bridge else {
             return;
         };
-        let (available, device_name, device_state, muted, mic_volume) =
-            if let Some(status) = &self.status {
-                (
-                    status.device.state == "active",
-                    status.device.name.clone(),
-                    status.device.state.clone(),
+        // Availability tracks the QuadCast S itself, not whatever endpoint Windows happens
+        // to have promoted to default. Home Assistant should show the mic as unavailable
+        // when it is unplugged, even though another microphone answered the status call.
+        let available = self.devices.connected();
+        let (device_name, device_state, muted, mic_volume) =
+            match (&self.devices.capture, &self.status) {
+                (Some(capture), status) => (
+                    capture.name.clone(),
+                    capture.state.clone(),
                     self.is_muted(),
-                    status.volume,
-                )
-            } else {
-                (
-                    false,
+                    status
+                        .as_ref()
+                        .map_or(self.mic_volume, |status| status.volume),
+                ),
+                (None, _) => (
                     "Unavailable".to_string(),
                     self.status_error
                         .clone()
-                        .unwrap_or_else(|| "unavailable".to_string()),
+                        .unwrap_or_else(|| "disconnected".to_string()),
                     self.is_muted(),
                     self.mic_volume,
-                )
+                ),
             };
         let input_level_percent = if muted {
             if self.last_mqtt_input_level_muted == Some(true) {
