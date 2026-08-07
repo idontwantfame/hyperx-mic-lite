@@ -7,3 +7,4 @@
 *.exe
 x.json
 captures/*.pcapng
+/.claude/
