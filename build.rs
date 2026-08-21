@@ -1,15 +1,22 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    io::Write,
+    path::PathBuf,
+    process::Command,
+};
 
 fn main() {
     emit_build_metadata();
 
     println!("cargo:rerun-if-changed=resources/hyperx_messages.mc");
+    println!("cargo:rerun-if-changed=resources/hyperx-mic-lite.ico");
     if env::var("CARGO_CFG_WINDOWS").is_err() {
         return;
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let message_file = PathBuf::from("resources/hyperx_messages.mc");
+    let icon_file = PathBuf::from("resources/hyperx-mic-lite.ico");
     let windmc = env::var("WINDMC").unwrap_or_else(|_| "windmc".to_string());
     let windres = env::var("WINDRES").unwrap_or_else(|_| "windres".to_string());
 
@@ -37,6 +44,7 @@ fn main() {
     }
 
     let resource_script = out_dir.join("hyperx_messages.rc");
+    append_icon_resource(&resource_script, &icon_file);
     let resource_object = out_dir.join("hyperx_messages.o");
     let windres_status = match Command::new(&windres)
         .arg("-i")
@@ -61,6 +69,20 @@ fn main() {
     }
 
     println!("cargo:rustc-link-arg={}", resource_object.display());
+}
+
+fn append_icon_resource(resource_script: &PathBuf, icon_file: &PathBuf) {
+    let icon_path = icon_file.display().to_string().replace('\\', "/");
+    match fs::OpenOptions::new().append(true).open(resource_script) {
+        Ok(mut file) => {
+            if let Err(error) = writeln!(file, "\n1 ICON \"{icon_path}\"") {
+                println!("cargo:warning=failed to append app icon resource: {error}");
+            }
+        }
+        Err(error) => {
+            println!("cargo:warning=failed to open resource script for app icon: {error}");
+        }
+    }
 }
 
 fn emit_build_metadata() {

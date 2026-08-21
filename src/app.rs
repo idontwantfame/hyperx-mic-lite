@@ -230,6 +230,7 @@ pub(crate) fn run_gui(args: &[String]) {
     }
     let options = eframe::NativeOptions {
         viewport,
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
