@@ -15,6 +15,7 @@ Lightweight Windows and macOS control software for the HyperX QuadCast S. It rep
 - 16-cell lighting frame rendering, top/bottom/all targets, optional split-layer effects, and explicit `Save to Mic`.
 - VU Meter lighting using direct input capture with smoothed flame-style output.
 - Per-user GUI startup, close/minimize-to-tray behavior, and saved window position.
+- Tray icon that is slashed while the mic is muted, with a right-click menu to mute or unmute, turn the lights on or off, pick the effect, open the window, and exit.
 - Structured app logs, panic reports, diagnostics bundle export, and Windows Event Viewer source registration.
 - Optional Windows service for boot-time audio restore and service health reporting.
 - Optional MQTT and Home Assistant MQTT discovery for read/write control.

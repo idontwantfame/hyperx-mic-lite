@@ -335,15 +335,15 @@ impl eframe::App for MicLiteApp {
     /// and also while hidden, as long as a repaint is pending. The repaint requested at the
     /// end is what keeps the tray, the mic buttons, MQTT and hotplug serviced in the tray.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if TrayHandle::show_requested() {
+        if crate::tray::show_requested() {
             self.restore_from_tray(ctx);
         }
-        if TrayHandle::exit_requested() {
+        if crate::tray::exit_requested() {
             self.force_exit = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             log_event("info", "tray.exit.request", &[]);
         }
-        while let Some(command) = TrayHandle::take_command() {
+        while let Some(command) = crate::tray::take_command() {
             self.apply_tray_command(command);
         }
         if ctx.input(|input| input.viewport().close_requested())

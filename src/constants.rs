@@ -24,6 +24,13 @@ pub(crate) const TRAY_UID: u32 = 1;
 pub(crate) const TRAY_MENU_OPEN: usize = 1001;
 #[cfg(windows)]
 pub(crate) const TRAY_MENU_EXIT: usize = 1002;
+#[cfg(windows)]
+pub(crate) const TRAY_MENU_MUTE: usize = 1003;
+#[cfg(windows)]
+pub(crate) const TRAY_MENU_LIGHTING: usize = 1004;
+/// The tray menu's effect entries take this id plus their index in `Effect::ALL`.
+#[cfg(windows)]
+pub(crate) const TRAY_MENU_EFFECT_BASE: usize = 1100;
 /// launchd label of the login item, also the plist's file name in `~/Library/LaunchAgents`.
 #[cfg(target_os = "macos")]
 pub(crate) const LAUNCH_AGENT_LABEL: &str = "local.hyperx-mic-lite.gui";

@@ -3,21 +3,13 @@
 //! The icon shows a slashed microphone while muted, and its menu offers the actions worth
 //! having without opening the window: mute, lighting on/off and the effect.
 
-use std::{
-    collections::VecDeque,
-    sync::{
-        Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
 };
 
 use super::{
-    TrayCommand, TrayState,
+    LIGHTS_ON_LABEL, MenuAction, TrayCommand, TrayState,
     glyph::{GLYPH_SIZE, glyph_part, muted_glyph_part},
 };
 use crate::{logging::log_event, model::Effect};
@@ -28,49 +20,25 @@ const MENU_MUTE_ID: &str = "mute";
 const MENU_LIGHTING_ID: &str = "lighting";
 const EFFECT_ID_PREFIX: &str = "effect:";
 
-static TRAY_SHOW_REQUESTED: AtomicBool = AtomicBool::new(false);
-static TRAY_EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-/// Menu choices waiting for the GUI, which drains them every tick.
-static TRAY_COMMANDS: Mutex<VecDeque<TrayCommand>> = Mutex::new(VecDeque::new());
-
 fn effect_id(effect: Effect) -> String {
     format!("{EFFECT_ID_PREFIX}{}", effect.as_config())
 }
 
-/// What a menu item asks for.
-#[derive(Debug, PartialEq)]
-enum MenuAction {
-    Open,
-    Quit,
-    Command(TrayCommand),
-}
-
-impl MenuAction {
-    fn from_id(id: &str) -> Option<Self> {
-        match id {
-            MENU_OPEN_ID => Some(Self::Open),
-            MENU_QUIT_ID => Some(Self::Quit),
-            MENU_MUTE_ID => Some(Self::Command(TrayCommand::ToggleMute)),
-            MENU_LIGHTING_ID => Some(Self::Command(TrayCommand::ToggleLighting)),
-            _ => id
-                .strip_prefix(EFFECT_ID_PREFIX)
-                .and_then(|name| {
-                    Effect::ALL
-                        .into_iter()
-                        .find(|effect| effect.as_config() == name)
-                })
-                .map(|effect| Self::Command(TrayCommand::SelectEffect(effect))),
-        }
-    }
-}
-
-fn status_text(state: &TrayState) -> &'static str {
-    if !state.connected {
-        "QuadCast S: Disconnected"
-    } else if state.muted {
-        "QuadCast S: Muted"
-    } else {
-        "QuadCast S: Live"
+/// What the menu item with `id` asks for.
+fn menu_action(id: &str) -> Option<MenuAction> {
+    match id {
+        MENU_OPEN_ID => Some(MenuAction::Open),
+        MENU_QUIT_ID => Some(MenuAction::Quit),
+        MENU_MUTE_ID => Some(MenuAction::Command(TrayCommand::ToggleMute)),
+        MENU_LIGHTING_ID => Some(MenuAction::Command(TrayCommand::ToggleLighting)),
+        _ => id
+            .strip_prefix(EFFECT_ID_PREFIX)
+            .and_then(|name| {
+                Effect::ALL
+                    .into_iter()
+                    .find(|effect| effect.as_config() == name)
+            })
+            .map(|effect| MenuAction::Command(TrayCommand::SelectEffect(effect))),
     }
 }
 
@@ -98,14 +66,8 @@ impl TrayHandle {
     /// is where eframe builds and updates the GUI, the only caller.
     pub(crate) fn start() -> Self {
         MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-            match MenuAction::from_id(event.id.as_ref()) {
-                Some(MenuAction::Open) => TRAY_SHOW_REQUESTED.store(true, Ordering::Relaxed),
-                Some(MenuAction::Quit) => TRAY_EXIT_REQUESTED.store(true, Ordering::Relaxed),
-                Some(MenuAction::Command(command)) => TRAY_COMMANDS
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push_back(command),
-                None => {}
+            if let Some(action) = menu_action(event.id.as_ref()) {
+                action.dispatch();
             }
         }));
         let icon = match build_menu_bar_item() {
@@ -121,21 +83,6 @@ impl TrayHandle {
         Self { icon, shown: None }
     }
 
-    pub(crate) fn show_requested() -> bool {
-        TRAY_SHOW_REQUESTED.swap(false, Ordering::Relaxed)
-    }
-
-    pub(crate) fn exit_requested() -> bool {
-        TRAY_EXIT_REQUESTED.swap(false, Ordering::Relaxed)
-    }
-
-    pub(crate) fn take_command() -> Option<TrayCommand> {
-        TRAY_COMMANDS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front()
-    }
-
     /// Bring the icon, tooltip and menu in line with `state`.
     pub(crate) fn update(&mut self, state: &TrayState) {
         if self.shown.as_ref() == Some(state) {
@@ -144,18 +91,8 @@ impl TrayHandle {
         let Some((icon, items)) = &self.icon else {
             return;
         };
-        log_event(
-            "info",
-            "tray.state",
-            &[
-                ("connected", state.connected.to_string()),
-                ("muted", state.muted.to_string()),
-                ("lighting", state.lighting_on.to_string()),
-            ],
-        );
-        // Disconnected counts as muted: nothing is being captured either way.
-        let slashed = state.muted || !state.connected;
-        match template_icon(slashed) {
+        state.log();
+        match template_icon(state.slashed()) {
             Ok(glyph) => {
                 if let Err(error) = icon.set_icon_templated(Some(glyph)) {
                     log_event("warn", "tray.icon.error", &[("message", error.to_string())]);
@@ -163,7 +100,7 @@ impl TrayHandle {
             }
             Err(error) => log_event("warn", "tray.icon.error", &[("message", error)]),
         }
-        let status = status_text(state);
+        let status = state.status_text();
         if let Err(error) = icon.set_tooltip(Some(status)) {
             log_event(
                 "warn",
@@ -172,18 +109,12 @@ impl TrayHandle {
             );
         }
         items.status.set_text(status);
-        items.mute.set_text(if state.muted {
-            "Unmute microphone"
-        } else {
-            "Mute microphone"
-        });
+        items.mute.set_text(state.mute_label());
         items.mute.set_enabled(state.connected);
         items.lighting.set_checked(state.lighting_on);
-        items
-            .effect_menu
-            .set_text(format!("Effect: {}", state.effect.label()));
+        items.effect_menu.set_text(state.effect_label());
         for (effect, item) in &items.effects {
-            item.set_checked(*effect == state.effect);
+            item.set_checked(state.effect == Some(*effect));
         }
         self.shown = Some(state.clone());
     }
@@ -193,8 +124,7 @@ fn build_menu_bar_item() -> Result<(TrayIcon, MenuItems), String> {
     let items = MenuItems {
         status: MenuItem::new("QuadCast S", false, None),
         mute: MenuItem::with_id(MENU_MUTE_ID, "Mute microphone", true, None),
-        // Not "Lighting": it sat one letter away from the Lightning effect below it.
-        lighting: CheckMenuItem::with_id(MENU_LIGHTING_ID, "Lights on", true, false, None),
+        lighting: CheckMenuItem::with_id(MENU_LIGHTING_ID, LIGHTS_ON_LABEL, true, false, None),
         effect_menu: Submenu::new("Effect", true),
         effects: Effect::ALL
             .into_iter()
@@ -238,8 +168,12 @@ fn build_menu_bar_item() -> Result<(TrayIcon, MenuItems), String> {
 
 /// The microphone glyph as a template image: opaque where the glyph is drawn and
 /// transparent elsewhere. macOS only uses the alpha, tinting it to match the menu bar.
-fn template_icon(muted: bool) -> Result<Icon, String> {
-    let part = if muted { muted_glyph_part } else { glyph_part };
+fn template_icon(slashed: bool) -> Result<Icon, String> {
+    let part = if slashed {
+        muted_glyph_part
+    } else {
+        glyph_part
+    };
     let rgba = (0..GLYPH_SIZE)
         .flat_map(|y| (0..GLYPH_SIZE).map(move |x| (x, y)))
         .flat_map(|(x, y)| {
@@ -254,46 +188,30 @@ fn template_icon(muted: bool) -> Result<Icon, String> {
 mod tests {
     use super::*;
 
-    fn state(connected: bool, muted: bool) -> TrayState {
-        TrayState {
-            connected,
-            muted,
-            lighting_on: false,
-            effect: Effect::Wave,
-        }
-    }
-
     #[test]
     fn menu_ids_map_to_their_actions() {
-        assert_eq!(MenuAction::from_id(MENU_OPEN_ID), Some(MenuAction::Open));
-        assert_eq!(MenuAction::from_id(MENU_QUIT_ID), Some(MenuAction::Quit));
+        assert_eq!(menu_action(MENU_OPEN_ID), Some(MenuAction::Open));
+        assert_eq!(menu_action(MENU_QUIT_ID), Some(MenuAction::Quit));
         assert_eq!(
-            MenuAction::from_id(MENU_MUTE_ID),
+            menu_action(MENU_MUTE_ID),
             Some(MenuAction::Command(TrayCommand::ToggleMute))
         );
         assert_eq!(
-            MenuAction::from_id(&effect_id(Effect::VuMeter)),
+            menu_action(&effect_id(Effect::VuMeter)),
             Some(MenuAction::Command(TrayCommand::SelectEffect(
                 Effect::VuMeter
             )))
         );
-        assert_eq!(MenuAction::from_id("effect:unknown"), None);
+        assert_eq!(menu_action("effect:unknown"), None);
     }
 
     #[test]
     fn every_effect_round_trips_through_its_menu_id() {
         for effect in Effect::ALL {
             assert_eq!(
-                MenuAction::from_id(&effect_id(effect)),
+                menu_action(&effect_id(effect)),
                 Some(MenuAction::Command(TrayCommand::SelectEffect(effect)))
             );
         }
-    }
-
-    #[test]
-    fn status_line_names_the_mic_state() {
-        assert_eq!(status_text(&state(true, false)), "QuadCast S: Live");
-        assert_eq!(status_text(&state(true, true)), "QuadCast S: Muted");
-        assert_eq!(status_text(&state(false, true)), "QuadCast S: Disconnected");
     }
 }

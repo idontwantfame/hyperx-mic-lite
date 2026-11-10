@@ -74,7 +74,7 @@ impl MicLiteApp {
             connected: self.devices.connected(),
             muted: self.is_muted(),
             lighting_on: self.lighting_cancel.is_some(),
-            effect: self.lighting.effect,
+            effect: (!self.lighting.split_layers).then_some(self.lighting.effect),
         }
     }
 
