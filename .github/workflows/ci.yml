@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,13 +31,21 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          path: target/release/hyperx-mic-lite.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
   macos:
     name: macOS
     runs-on: macos-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -54,4 +62,14 @@ jobs:
         run: cargo test --all-targets --locked
 
       - name: Build app bundle
-        run: scripts/bundle-macos.sh
+        run: scripts/bundle-macos.sh --zip
+
+      # Uploaded as the ditto zip itself: GitHub's own artifact zip would drop the
+      # executable bit from the app inside.
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
