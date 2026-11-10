@@ -38,9 +38,59 @@ jobs:
       - name: Indexed
         run: echo "Release workflow is available from workflow_dispatch."
 
+  macos:
+    name: Build macOS App
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync Master
+        run: |
+          git fetch origin master
+          git checkout -B master origin/master
+
+      - name: Resolve Version
+        run: |
+          snapshot="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [[ ! "$snapshot" =~ ^[0-9]+\.[0-9]+\.[0-9]+-SNAPSHOT$ ]]; then
+            echo "Cargo.toml version '$snapshot' is not a release snapshot." >&2
+            exit 1
+          fi
+          echo "HYPERX_BUILD_VERSION=${snapshot%-SNAPSHOT}" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Test
+        run: cargo test --all-targets --locked
+
+      - name: Package
+        run: |
+          scripts/bundle-macos.sh --universal --zip
+          cd dist
+          for archive in *.zip; do
+            shasum -a 256 "$archive" > "$archive.sha256"
+          done
+
+      - name: Upload Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+
   release:
     name: Build And Publish
     if: github.event_name == 'workflow_dispatch'
+    needs: macos
     runs-on: windows-latest
 
     steps:
@@ -132,6 +182,12 @@ jobs:
           "sha=$zip.sha256" >> $env:GITHUB_OUTPUT
           "asset_name=$name.zip" >> $env:GITHUB_OUTPUT
 
+      - name: Download macOS App
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-release
+          path: dist-macos
+
       - name: Commit Release Version
         shell: pwsh
         run: |
@@ -164,6 +220,7 @@ jobs:
           files: |
             ${{ steps.package.outputs.zip }}
             ${{ steps.package.outputs.sha }}
+            dist-macos/*
 
       - name: Start Next Snapshot
         shell: pwsh

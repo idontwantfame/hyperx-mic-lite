@@ -6,6 +6,7 @@ use std::{
     process,
 };
 
+#[cfg(windows)]
 use windows::{
     Win32::System::EventLog::{
         DeregisterEventSource, EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE,
@@ -14,8 +15,9 @@ use windows::{
     core::{PCWSTR, w},
 };
 
+#[cfg(windows)]
+use crate::constants::EVENTLOG_MESSAGE_ID;
 use crate::{
-    constants::EVENTLOG_MESSAGE_ID,
     paths::{app_data_dir, config_path, log_file_path},
     time::unix_timestamp_seconds,
 };
@@ -75,19 +77,26 @@ pub(crate) fn log_event(level: &str, event: &str, fields: &[(&str, String)]) {
     }
 
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{}", serde_json::Value::Object(object));
+        // One write per line: `writeln!` may issue several, and lines logged at the same
+        // moment from different threads then interleave into invalid JSON.
+        let line = format!("{}\n", serde_json::Value::Object(object));
+        let _ = file.write_all(line.as_bytes());
     }
 
+    // macOS has no Event Viewer counterpart wired up; the log file is the only sink there.
+    #[cfg(windows)]
     if should_write_event_log(level, event) {
         write_windows_event(level, event, fields);
     }
 }
 
+#[cfg(windows)]
 fn should_write_event_log(level: &str, event: &str) -> bool {
     matches!(level, "warn" | "error")
         || matches!(event, "app.start" | "app.exit" | "gui.start" | "gui.exit")
 }
 
+#[cfg(windows)]
 fn write_windows_event(level: &str, event: &str, fields: &[(&str, String)]) {
     let event_type = match level {
         "error" => EVENTLOG_ERROR_TYPE,

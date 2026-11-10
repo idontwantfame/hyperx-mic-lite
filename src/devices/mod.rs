@@ -5,10 +5,11 @@
 //! pointing at a device that was no longer there. This module owns presence instead and
 //! publishes transitions to the GUI.
 //!
-//! Detection is event-driven where Windows offers events: `IMMNotificationClient` fires as
-//! soon as the audio service adds, removes, or restates an endpoint. It is backed by a slow
-//! re-enumeration timer for two reasons — the HID lighting interface has no equivalent
-//! notification, and a missed or unregistered callback must not leave the UI stuck.
+//! Detection is event-driven where the OS offers events: Windows fires
+//! `IMMNotificationClient` and macOS a CoreAudio property listener as soon as an audio
+//! endpoint is added, removed, or restated. Both are backed by a slow re-enumeration timer
+//! for two reasons — the HID lighting interface has no equivalent notification, and a
+//! missed or unregistered callback must not leave the UI stuck.
 
 use std::{
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
@@ -16,21 +17,18 @@ use std::{
     time::Duration,
 };
 
-use windows::{
-    Win32::{
-        Foundation::PROPERTYKEY,
-        Media::Audio::{
-            DEVICE_STATE, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
-            IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eRender,
-        },
-        System::Com::{CLSCTX_ALL, CoCreateInstance},
-    },
-    core::{PCWSTR, Result as WinResult, implement},
-};
+#[cfg(target_os = "macos")]
+mod core_audio;
+#[cfg(windows)]
+mod wasapi;
+
+#[cfg(target_os = "macos")]
+use core_audio as backend;
+#[cfg(windows)]
+use wasapi as backend;
 
 use crate::{
-    audio::hyperx_endpoint_info,
-    com::ComApartment,
+    audio::{EndpointFlow, hyperx_endpoint_info},
     lighting::detect_lighting_device,
     logging::log_event,
     model::{DeviceInfo, LightingDevice},
@@ -148,25 +146,15 @@ impl DeviceWatcher {
 }
 
 fn watch_devices(sender: Sender<DeviceEvent>) {
-    // The watcher owns COM interfaces on this thread only; see `init_multithreaded` for why
-    // it must not be an STA.
-    let _com = match ComApartment::init_multithreaded() {
-        Ok(com) => com,
-        Err(error) => {
-            log_event(
-                "error",
-                "devices.watch.com_init.error",
-                &[("message", error.to_string())],
-            );
-            return;
-        }
+    let Some(_thread) = backend::prepare_watcher_thread() else {
+        return;
     };
 
     let (wake_sender, wake_receiver) = mpsc::channel();
     // Kept alive for the life of the loop so `recv_timeout` reports Timeout rather than
     // Disconnected when registration failed and nothing else holds a sender.
     let _wake_sender = wake_sender.clone();
-    let _registration = match EndpointNotifications::register(wake_sender) {
+    let _registration = match backend::EndpointNotifications::register(wake_sender) {
         Ok(registration) => {
             log_event("info", "devices.watch.notifications.registered", &[]);
             Some(registration)
@@ -233,106 +221,9 @@ pub(crate) fn probe() -> DeviceSnapshot {
 /// raises no event — the app has no business reacting to hardware it does not control.
 fn probe_devices() -> DeviceSnapshot {
     DeviceSnapshot {
-        capture: hyperx_endpoint_info(eCapture).unwrap_or_default(),
-        render: hyperx_endpoint_info(eRender).unwrap_or_default(),
+        capture: hyperx_endpoint_info(EndpointFlow::Capture).unwrap_or_default(),
+        render: hyperx_endpoint_info(EndpointFlow::Render).unwrap_or_default(),
         lighting: detect_lighting_device(),
-    }
-}
-
-/// Keeps the endpoint notification callback registered for as long as it is held.
-struct EndpointNotifications {
-    enumerator: IMMDeviceEnumerator,
-    client: IMMNotificationClient,
-}
-
-impl EndpointNotifications {
-    fn register(wake: Sender<()>) -> WinResult<Self> {
-        // SAFETY: MMDeviceEnumerator is the well-known CLSID for this coclass, COM is
-        // initialized on this thread by the caller, and no aggregation is used (None).
-        let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
-        let client: IMMNotificationClient = EndpointNotifier { wake }.into();
-        // SAFETY: enumerator is the live interface created above; `client` is an owned
-        // reference held in the returned struct, so it outlives the registration, which is
-        // undone in Drop before the reference is released.
-        unsafe { enumerator.RegisterEndpointNotificationCallback(&client)? };
-        Ok(Self { enumerator, client })
-    }
-}
-
-impl Drop for EndpointNotifications {
-    fn drop(&mut self) {
-        // SAFETY: unregisters exactly the client registered in `register` on the same live
-        // enumerator; both are still alive at this point.
-        let result = unsafe {
-            self.enumerator
-                .UnregisterEndpointNotificationCallback(&self.client)
-        };
-        if let Err(error) = result {
-            log_event(
-                "warn",
-                "devices.watch.notifications.unregister.error",
-                &[("message", error.to_string())],
-            );
-        }
-    }
-}
-
-/// Nudges the watcher whenever the audio service reports an endpoint change.
-///
-/// The callbacks run on a thread owned by the audio service, so they do no work beyond
-/// signalling; all enumeration happens back on the watcher thread.
-#[implement(IMMNotificationClient)]
-struct EndpointNotifier {
-    wake: Sender<()>,
-}
-
-// COM invokes the callbacks through `&self` from an audio-service thread while the watcher
-// thread owns the other end of the channel, and the `IMMNotificationClient_Impl` trait does
-// not require thread safety. Assert it here so a future field cannot silently remove it.
-const _: fn() = || {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<EndpointNotifier>();
-};
-
-impl EndpointNotifier {
-    fn poke(&self) {
-        // A full channel or a dropped watcher is not worth reporting: the watcher is either
-        // already about to re-probe or gone.
-        let _ = self.wake.send(());
-    }
-}
-
-impl IMMNotificationClient_Impl for EndpointNotifier_Impl {
-    fn OnDeviceStateChanged(&self, _device_id: &PCWSTR, _new_state: DEVICE_STATE) -> WinResult<()> {
-        self.poke();
-        Ok(())
-    }
-
-    fn OnDeviceAdded(&self, _device_id: &PCWSTR) -> WinResult<()> {
-        self.poke();
-        Ok(())
-    }
-
-    fn OnDeviceRemoved(&self, _device_id: &PCWSTR) -> WinResult<()> {
-        self.poke();
-        Ok(())
-    }
-
-    fn OnDefaultDeviceChanged(
-        &self,
-        _flow: EDataFlow,
-        _role: ERole,
-        _default_device_id: &PCWSTR,
-    ) -> WinResult<()> {
-        self.poke();
-        Ok(())
-    }
-
-    fn OnPropertyValueChanged(&self, _device_id: &PCWSTR, _key: &PROPERTYKEY) -> WinResult<()> {
-        // Deliberately ignored. Property churn (volume, format, icon) is frequent and never
-        // signals arrival or removal; waking on it would re-enumerate constantly.
-        Ok(())
     }
 }
 

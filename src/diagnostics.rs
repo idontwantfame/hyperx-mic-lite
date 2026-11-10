@@ -7,13 +7,10 @@ use std::{
 use crate::{
     audio::{list_capture_devices, mic_status},
     constants::APP_NAME,
-    lighting::{
-        detect_lighting_device, hid_caps_for_path, is_supported_lighting_device,
-        lighting_device_score,
-    },
+    hid_caps::hid_caps_for_path,
+    lighting::{detect_lighting_device, is_supported_lighting_device, lighting_device_score},
     logging::{log_event, log_timestamp},
     paths::{app_data_dir, config_path, log_file_path},
-    service::read_service_health,
     time::unix_timestamp_seconds,
 };
 pub(crate) fn run_diagnostics_command(args: &[String]) {
@@ -99,9 +96,11 @@ pub(crate) fn export_diagnostics_bundle(destination: &Path) -> Result<(), String
         &destination.join("lighting-hid.json"),
         &collect_lighting_hid_diagnostics(),
     )?;
+    // The background service, and so its health file, only exists on Windows.
+    #[cfg(windows)]
     write_json_file(
         &destination.join("service-health.json"),
-        &match read_service_health() {
+        &match crate::service::read_service_health() {
             Ok(health) => serde_json::json!(health),
             Err(error) => serde_json::json!({ "error": error }),
         },
@@ -128,17 +127,17 @@ fn collect_lighting_hid_diagnostics() -> serde_json::Value {
         .map(|device| {
             let caps = match hid_caps_for_path(device.path()) {
                 Ok(caps) => serde_json::json!({
-                    "input_report_bytes": caps.InputReportByteLength,
-                    "output_report_bytes": caps.OutputReportByteLength,
-                    "feature_report_bytes": caps.FeatureReportByteLength,
-                    "input_button_caps": caps.NumberInputButtonCaps,
-                    "input_value_caps": caps.NumberInputValueCaps,
-                    "output_button_caps": caps.NumberOutputButtonCaps,
-                    "output_value_caps": caps.NumberOutputValueCaps,
-                    "feature_button_caps": caps.NumberFeatureButtonCaps,
-                    "feature_value_caps": caps.NumberFeatureValueCaps,
+                    "input_report_bytes": caps.input_report_bytes,
+                    "output_report_bytes": caps.output_report_bytes,
+                    "feature_report_bytes": caps.feature_report_bytes,
+                    "input_button_caps": caps.input_button_caps,
+                    "input_value_caps": caps.input_value_caps,
+                    "output_button_caps": caps.output_button_caps,
+                    "output_value_caps": caps.output_value_caps,
+                    "feature_button_caps": caps.feature_button_caps,
+                    "feature_value_caps": caps.feature_value_caps,
                 }),
-                Err(error) => serde_json::json!({ "error": error.to_string() }),
+                Err(error) => serde_json::json!({ "error": error }),
             };
 
             serde_json::json!({

@@ -133,7 +133,7 @@ impl MicLiteApp {
         let mqtt_runtime = start_mqtt_runtime(&config.mqtt);
         // Probe once synchronously so the first frame reflects real hardware; the watcher
         // re-reports it immediately anyway, and takes over from there.
-        let devices = crate::devices::probe();
+        let devices = outside_event_loop(crate::devices::probe);
         let input_peak_bits = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let mut app = Self {
             tab: Tab::from_config(&config.ui.selected_tab),
@@ -297,6 +297,25 @@ impl MicLiteApp {
     }
 }
 
+/// Run `work`, which enumerates HID devices, without letting it re-enter the event loop.
+///
+/// hidapi on macOS spins the calling thread's run loop while it enumerates. On the GUI
+/// thread that dispatches winit's queued events from inside the one being handled, and
+/// winit aborts the process. A helper thread has a run loop of its own; the caller still
+/// waits for the result. On Windows the work stays on the GUI thread, whose COM apartment
+/// the audio queries need.
+fn outside_event_loop<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    #[cfg(target_os = "macos")]
+    return std::thread::scope(|scope| {
+        scope
+            .spawn(work)
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    });
+    #[cfg(not(target_os = "macos"))]
+    work()
+}
+
 fn notice_color(severity: NoticeSeverity) -> egui::Color32 {
     match severity {
         NoticeSeverity::Good => egui::Color32::from_rgb(118, 220, 150),
@@ -307,10 +326,14 @@ fn notice_color(severity: NoticeSeverity) -> egui::Color32 {
 }
 
 impl eframe::App for MicLiteApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Everything that has to keep running while the window is hidden in the tray.
+    ///
+    /// eframe only calls `ui` while the window is visible, but calls this before every frame
+    /// and also while hidden, as long as a repaint is pending. The repaint requested at the
+    /// end is what keeps the tray, the mic buttons, MQTT and hotplug serviced in the tray.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if TrayHandle::show_requested() {
-            self.restore_from_tray(&ctx);
+            self.restore_from_tray(ctx);
         }
         if TrayHandle::exit_requested() {
             self.force_exit = true;
@@ -352,15 +375,15 @@ impl eframe::App for MicLiteApp {
             if self.minimize_to_tray {
                 self.ensure_tray_started();
                 self.hidden_to_tray = true;
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
             self.start_minimized_applied = true;
             log_event("info", "gui.start_minimized", &[]);
         }
+        self.tick_background();
+        self.remember_window_position(ctx);
         // Tick slower while hidden in the tray: only tray/MQTT/HID plumbing needs
         // servicing there, and 4 Hz keeps those responsive at a fraction of the CPU.
         let repaint_delay = if self.hidden_to_tray {
@@ -368,7 +391,11 @@ impl eframe::App for MicLiteApp {
         } else {
             Duration::from_millis(50)
         };
-        ui.ctx().request_repaint_after(repaint_delay);
+        ctx.request_repaint_after(repaint_delay);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let inner_width = (ui.available_width() - 20.0).max(0.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -386,6 +413,5 @@ impl eframe::App for MicLiteApp {
             ui.add_space(10.0);
         });
         self.ui_mqtt_settings_window(&ctx);
-        self.remember_window_position(&ctx);
     }
 }

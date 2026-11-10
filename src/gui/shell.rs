@@ -1,5 +1,6 @@
 use eframe::egui;
 use std::{
+    path::Path,
     process::Command,
     time::{Duration, Instant},
 };
@@ -15,7 +16,40 @@ use crate::{
     tray::TrayHandle,
 };
 
-use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice};
+use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice, outside_event_loop};
+
+#[cfg(windows)]
+const OPEN_LOGS_LABEL: &str = "Open logs in terminal";
+#[cfg(target_os = "macos")]
+const OPEN_LOGS_LABEL: &str = "Open logs in Console";
+
+/// A PowerShell window following the log file.
+#[cfg(windows)]
+fn log_viewer_command(log: &Path) -> Command {
+    // PowerShell single-quoted strings escape ' by doubling it; this keeps unusual
+    // (e.g. redirected %APPDATA%) paths from breaking out of the quoted argument.
+    let escaped_path = log.display().to_string().replace('\'', "''");
+    let command = format!("Get-Content -Path '{escaped_path}' -Wait -Tail 100");
+    let mut viewer = Command::new("cmd");
+    viewer.args([
+        "/C",
+        "start",
+        "powershell",
+        "-NoExit",
+        "-Command",
+        command.as_str(),
+    ]);
+    viewer
+}
+
+/// Console.app, which follows a plain log file as it grows. The path goes in as its own
+/// argument, so no shell quoting is involved.
+#[cfg(target_os = "macos")]
+fn log_viewer_command(log: &Path) -> Command {
+    let mut viewer = Command::new("/usr/bin/open");
+    viewer.args(["-a", "Console"]).arg(log);
+    viewer
+}
 
 impl MicLiteApp {
     const DASHBOARD_STAGE_HEIGHT: f32 = 250.0;
@@ -174,7 +208,7 @@ impl MicLiteApp {
             self.export_diagnostics_action();
             ui.close();
         }
-        if ui.button("Open logs in terminal").clicked() {
+        if ui.button(OPEN_LOGS_LABEL).clicked() {
             self.open_log_terminal();
             ui.close();
         }
@@ -193,14 +227,13 @@ impl MicLiteApp {
             .set_file_name("hyperx-config.json")
             .add_filter("JSON", &["json"])
             .save_file()
+            && let Err(error) = export_config(&dest)
         {
-            if let Err(error) = export_config(&dest) {
-                log_event(
-                    "error",
-                    "config.export.error",
-                    &[("message", error.to_string())],
-                );
-            }
+            log_event(
+                "error",
+                "config.export.error",
+                &[("message", error.to_string())],
+            );
         }
     }
 
@@ -209,14 +242,13 @@ impl MicLiteApp {
             .set_title("Import configuration")
             .add_filter("JSON", &["json"])
             .pick_file()
+            && let Err(error) = import_config(&source)
         {
-            if let Err(error) = import_config(&source) {
-                log_event(
-                    "error",
-                    "config.import.error",
-                    &[("message", error.to_string())],
-                );
-            }
+            log_event(
+                "error",
+                "config.import.error",
+                &[("message", error.to_string())],
+            );
         }
     }
 
@@ -226,29 +258,14 @@ impl MicLiteApp {
             .pick_folder()
         {
             let dest = folder.join("hyperx-diagnostics");
-            if let Err(error) = export_diagnostics_bundle(&dest) {
+            if let Err(error) = outside_event_loop(|| export_diagnostics_bundle(&dest)) {
                 log_event("error", "diagnostics.export.error", &[("message", error)]);
             }
         }
     }
 
     fn open_log_terminal(&mut self) {
-        let log = log_file_path();
-        // PowerShell single-quoted strings escape ' by doubling it; this keeps unusual
-        // (e.g. redirected %APPDATA%) paths from breaking out of the quoted argument.
-        let escaped_path = log.display().to_string().replace('\'', "''");
-        let command = format!("Get-Content -Path '{escaped_path}' -Wait -Tail 100");
-        if let Err(error) = Command::new("cmd")
-            .args([
-                "/C",
-                "start",
-                "powershell",
-                "-NoExit",
-                "-Command",
-                command.as_str(),
-            ])
-            .spawn()
-        {
+        if let Err(error) = log_viewer_command(&log_file_path()).spawn() {
             log_event(
                 "error",
                 "logs.terminal.error",
@@ -257,7 +274,8 @@ impl MicLiteApp {
         }
     }
 
-    pub(super) fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
+    /// Service events and periodic refreshes. Runs every tick, including while hidden.
+    pub(super) fn tick_background(&mut self) {
         // First: a connect or disconnect invalidates the status, capture stream and HID
         // handles that everything below reads.
         self.drain_device_events();
@@ -268,6 +286,9 @@ impl MicLiteApp {
         self.ensure_input_monitor();
         self.refresh_input_peak();
         self.publish_mqtt_state_periodic();
+    }
+
+    pub(super) fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
         self.ui_mic_stage(ui, Self::DASHBOARD_STAGE_HEIGHT);
         ui.separator();
         let gap = Self::DASHBOARD_COLUMN_GAP;

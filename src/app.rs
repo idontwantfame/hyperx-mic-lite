@@ -1,6 +1,7 @@
-use std::{env, process};
+use std::{env, error::Error, process};
 
 use eframe::egui;
+#[cfg(windows)]
 use windows::{
     Win32::{
         Storage::FileSystem::{
@@ -12,7 +13,7 @@ use windows::{
             STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
         },
     },
-    core::{Result as WinResult, w},
+    core::w,
 };
 
 use crate::{
@@ -20,11 +21,9 @@ use crate::{
         list_capture_devices, mic_status, print_devices_json, print_status_json, run_audio_command,
         set_mic_mute, set_volume, toggle_mic_mute,
     },
-    com::ComApartment,
     config::{AppConfig, load_or_create_config},
     config_cli::run_config_command,
     diagnostics::run_diagnostics_command,
-    eventlog::run_eventlog_command,
     gui::MicLiteApp,
     lighting::{
         print_lighting_detection, print_lighting_hid_dump, run_hid_monitor, run_level_monitor,
@@ -32,8 +31,13 @@ use crate::{
     },
     logging::{install_panic_hook, log_event},
     logs::run_logs_command,
-    service::{run_service_command, run_windows_service, windows_service_error},
     startup::run_startup_command,
+};
+#[cfg(windows)]
+use crate::{
+    com::ComApartment,
+    eventlog::run_eventlog_command,
+    service::{run_service_command, run_windows_service, windows_service_error},
 };
 pub fn run_app() {
     let launched_from_terminal = attach_parent_console();
@@ -51,18 +55,18 @@ pub fn run_app() {
     log_event("info", "app.exit", &[]);
 }
 
-fn run(launched_from_terminal: bool) -> WinResult<()> {
+fn run(launched_from_terminal: bool) -> Result<(), Box<dyn Error>> {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    // Every path below may reach WASAPI from this thread.
+    #[cfg(windows)]
+    let _com = ComApartment::init()?;
     if args.is_empty() {
         if launched_from_terminal {
             startup_info();
         }
-        let _com = ComApartment::init()?;
         run_gui(&[]);
         return Ok(());
     }
-
-    let _com = ComApartment::init()?;
 
     match args[0].as_str() {
         "help" | "--help" | "-h" => usage(),
@@ -80,15 +84,23 @@ fn run(launched_from_terminal: bool) -> WinResult<()> {
         "config" => run_config_command(&args[1..]),
         "logs" => run_logs_command(&args[1..]),
         "diagnostics" => run_diagnostics_command(&args[1..]),
+        #[cfg(windows)]
         "eventlog" => run_eventlog_command(&args[1..]),
+        #[cfg(windows)]
         "service" => run_service_command(&args[1..]),
         "startup" => run_startup_command(&args[1..]),
+        #[cfg(windows)]
         "service-run" => {
             if let Err(error) = run_windows_service() {
                 let message = windows_service_error(error);
                 log_event("error", "service.dispatcher.error", &[("message", message)]);
                 process::exit(1);
             }
+        }
+        #[cfg(not(windows))]
+        "eventlog" | "service" | "service-run" => {
+            eprintln!("`{}` is only available on Windows.", args[0]);
+            process::exit(2);
         }
         "gui" => run_gui(&args[1..]),
         "mute" => {
@@ -113,6 +125,15 @@ fn run(launched_from_terminal: bool) -> WinResult<()> {
     Ok(())
 }
 
+/// A process started from a terminal on macOS already shares its stdio; only report whether
+/// there is one, so the GUI knows to print the command hints.
+#[cfg(not(windows))]
+fn attach_parent_console() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
+#[cfg(windows)]
 fn attach_parent_console() -> bool {
     let attached =
         (unsafe { AttachConsole(ATTACH_PARENT_PROCESS).is_ok() }) || attached_to_existing_console();
@@ -122,12 +143,14 @@ fn attach_parent_console() -> bool {
     attached
 }
 
+#[cfg(windows)]
 fn attached_to_existing_console() -> bool {
     let mut processes = [0u32; 8];
     let count = unsafe { GetConsoleProcessList(&mut processes) };
     count > 1
 }
 
+#[cfg(windows)]
 fn redirect_stdio_to_console() {
     unsafe {
         if let Ok(output) = CreateFileW(
@@ -167,9 +190,12 @@ Useful command-line options:\n\
   hyperx-mic-lite lighting-detect                Detect the lighting HID interface\n\
   hyperx-mic-lite lighting-effect wave forever   Run a lighting effect from the terminal\n\
   hyperx-mic-lite config dump                    Print saved app configuration\n\
-  hyperx-mic-lite diagnostics export             Create a diagnostic bundle\n\
-  hyperx-mic-lite service status                 Show background service status\n\
-  hyperx-mic-lite gui --start-minimized          Start GUI hidden/minimized\n\n\
+  hyperx-mic-lite diagnostics export             Create a diagnostic bundle"
+    );
+    #[cfg(windows)]
+    eprintln!("hyperx-mic-lite service status                 Show background service status");
+    eprintln!(
+        "hyperx-mic-lite gui --start-minimized          Start GUI hidden/minimized\n\n\
 Run `hyperx-mic-lite help` to show the full command list.\n"
     );
 }
@@ -198,10 +224,15 @@ Usage:\n\
   hyperx-mic-lite lighting-save [--packet-log]\n\
   hyperx-mic-lite config <path|dump|export|import|validate|reset>\n\
   hyperx-mic-lite logs <path|tail>\n\
-  hyperx-mic-lite diagnostics export [directory]\n\
-  hyperx-mic-lite eventlog <register|unregister|status>\n\
-  hyperx-mic-lite service <install|uninstall|start|stop|status|run>\n\
-  hyperx-mic-lite startup <install|uninstall|status>\n\
+  hyperx-mic-lite diagnostics export [directory]"
+    );
+    #[cfg(windows)]
+    eprintln!(
+        "hyperx-mic-lite eventlog <register|unregister|status>\n\
+  hyperx-mic-lite service <install|uninstall|start|stop|status|run>"
+    );
+    eprintln!(
+        "hyperx-mic-lite startup <install|uninstall|status>\n\
   hyperx-mic-lite gui [--start-minimized]"
     );
 }

@@ -30,3 +30,28 @@ jobs:
 
       - name: Build release
         run: cargo build --release --locked
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --all-targets --locked
+
+      - name: Test
+        run: cargo test --all-targets --locked
+
+      - name: Build app bundle
+        run: scripts/bundle-macos.sh

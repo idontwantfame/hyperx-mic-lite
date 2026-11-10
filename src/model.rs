@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Serialize, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceInfo {
@@ -186,7 +186,9 @@ pub(crate) struct LightingDevice {
     pub(crate) product: String,
 }
 
-#[derive(Serialize, Deserialize)]
+/// Written by the Windows background service, which has no macOS counterpart.
+#[cfg(windows)]
+#[derive(Serialize, serde::Deserialize)]
 pub(crate) struct ServiceHealth {
     pub(crate) schema_version: u32,
     pub(crate) service_name: String,

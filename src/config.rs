@@ -349,10 +349,10 @@ fn validate_percent(name: &str, value: u8) -> Result<(), String> {
 }
 
 fn validate_optional_window_position(name: &str, value: Option<f32>) -> Result<(), String> {
-    if let Some(value) = value {
-        if !value.is_finite() || !(-32000.0..=32000.0).contains(&value) {
-            return Err(format!("{name} must be a finite screen coordinate."));
-        }
+    if let Some(value) = value
+        && (!value.is_finite() || !(-32000.0..=32000.0).contains(&value))
+    {
+        return Err(format!("{name} must be a finite screen coordinate."));
     }
     Ok(())
 }

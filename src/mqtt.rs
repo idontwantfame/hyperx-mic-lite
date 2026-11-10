@@ -148,14 +148,13 @@ pub(crate) fn start_mqtt_runtime(config: &MqttConfig) -> Option<MqttRuntime> {
                         &topics,
                         &publish.topic,
                         &String::from_utf8_lossy(&publish.payload),
-                    ) {
-                        if let Err(error) = sender.try_send(command) {
-                            log_event(
-                                "warn",
-                                "mqtt.command.dropped",
-                                &[("message", error.to_string())],
-                            );
-                        }
+                    ) && let Err(error) = sender.try_send(command)
+                    {
+                        log_event(
+                            "warn",
+                            "mqtt.command.dropped",
+                            &[("message", error.to_string())],
+                        );
                     }
                 }
                 Ok(_) => {}

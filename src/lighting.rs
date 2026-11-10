@@ -1,6 +1,7 @@
 use eframe::egui;
 use std::{
-    ffi::CStr,
+    collections::HashSet,
+    hash::Hash,
     process,
     sync::{
         Arc,
@@ -11,27 +12,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-use windows::{
-    Win32::{
-        Devices::HumanInterfaceDevice::{
-            HIDP_CAPS, HIDP_STATUS_SUCCESS, HidD_FreePreparsedData, HidD_GetPreparsedData,
-            HidP_GetCaps, PHIDP_PREPARSED_DATA,
-        },
-        Foundation::CloseHandle,
-        Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_EXISTING,
-        },
-    },
-    core::PCWSTR,
-};
-
+#[cfg(windows)]
+use crate::com::ComApartment;
 use crate::{
     audio::{
         AudioPeakMonitor, input_peak_value, mic_status, peak_from_bits, start_audio_peak_monitor,
     },
-    com::ComApartment,
     config::{AppConfig, load_or_create_config},
+    hid_caps::hid_caps_for_path,
+    lighting_port::LightingPort,
     logging::log_event,
     model::{Effect, HidEvent, LightTarget, LightingDevice, PolarPattern},
 };
@@ -154,15 +143,11 @@ pub(crate) fn print_lighting_hid_dump() {
             Ok(caps) => {
                 println!(
                     "  reports: input={} output={} feature={}",
-                    caps.InputReportByteLength,
-                    caps.OutputReportByteLength,
-                    caps.FeatureReportByteLength
+                    caps.input_report_bytes, caps.output_report_bytes, caps.feature_report_bytes
                 );
                 println!(
                     "  caps: input-values={} output-values={} feature-values={}",
-                    caps.NumberInputValueCaps,
-                    caps.NumberOutputValueCaps,
-                    caps.NumberFeatureValueCaps
+                    caps.input_value_caps, caps.output_value_caps, caps.feature_value_caps
                 );
             }
             Err(error) => println!("  caps: {error}"),
@@ -170,71 +155,21 @@ pub(crate) fn print_lighting_hid_dump() {
     }
 }
 
-pub(crate) fn hid_caps_for_path(path: &CStr) -> Result<HIDP_CAPS, LightingError> {
-    let path = path.to_string_lossy();
-    let wide_path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
-    // SAFETY: wide_path is a null-terminated UTF-16 buffer that outlives the call; access mask 0
-    // with OPEN_EXISTING is valid for opening a HID device just to query its capabilities.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide_path.as_ptr()),
-            0,
-            FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
-        )
-    }
-    .map_err(|error| LightingError::Hid(error.to_string()))?;
-
-    let mut preparsed: PHIDP_PREPARSED_DATA = PHIDP_PREPARSED_DATA::default();
-    // SAFETY: handle is the valid HID device handle opened above; preparsed is only used after
-    // HidD_GetPreparsedData returns TRUE and is freed exactly once, HidP_GetCaps writes only to
-    // the local HIDP_CAPS out-param, and handle is closed on both the error and success paths.
-    let result = unsafe {
-        if !HidD_GetPreparsedData(handle, &mut preparsed) {
-            let _ = CloseHandle(handle);
-            return Err(LightingError::Hid(
-                "HidD_GetPreparsedData failed".to_string(),
-            ));
-        }
-
-        let mut caps = HIDP_CAPS::default();
-        let status = HidP_GetCaps(preparsed, &mut caps);
-        HidD_FreePreparsedData(preparsed);
-        let _ = CloseHandle(handle);
-
-        if status == HIDP_STATUS_SUCCESS {
-            Ok(caps)
-        } else {
-            Err(LightingError::Hid(format!(
-                "HidP_GetCaps failed with NTSTATUS 0x{:08x}",
-                status.0
-            )))
-        }
-    };
-
-    result
-}
+/// USB vendor and product IDs of the QuadCast S lighting controller: the Kingston original
+/// and the later HP-branded revisions.
+pub(crate) const SUPPORTED_LIGHTING_IDS: [(u16, u16); 6] = [
+    (0x0951, 0x171f),
+    (0x03f0, 0x0f8b),
+    (0x03f0, 0x028c),
+    (0x03f0, 0x048c),
+    (0x03f0, 0x068c),
+    (0x03f0, 0x098c),
+];
 
 pub(crate) fn detect_lighting_device() -> Option<LightingDevice> {
     let api = hidapi::HidApi::new().ok()?;
-    let supported = [
-        (0x0951, 0x171f),
-        (0x03f0, 0x0f8b),
-        (0x03f0, 0x028c),
-        (0x03f0, 0x048c),
-        (0x03f0, 0x068c),
-        (0x03f0, 0x098c),
-    ];
-
     api.device_list()
-        .filter(|device| {
-            supported.iter().any(|(vendor, product)| {
-                device.vendor_id() == *vendor && device.product_id() == *product
-            })
-        })
+        .filter(|device| is_supported_lighting_device(device))
         .max_by_key(|device| lighting_device_score(device))
         .map(|device| LightingDevice {
             vendor_id: device.vendor_id(),
@@ -248,15 +183,7 @@ pub(crate) fn detect_lighting_device() -> Option<LightingDevice> {
 }
 
 pub(crate) fn is_supported_lighting_device(device: &hidapi::DeviceInfo) -> bool {
-    matches!(
-        (device.vendor_id(), device.product_id()),
-        (0x0951, 0x171f)
-            | (0x03f0, 0x0f8b)
-            | (0x03f0, 0x028c)
-            | (0x03f0, 0x048c)
-            | (0x03f0, 0x068c)
-            | (0x03f0, 0x098c)
-    )
+    SUPPORTED_LIGHTING_IDS.contains(&(device.vendor_id(), device.product_id()))
 }
 
 pub(crate) fn lighting_device_score(device: &hidapi::DeviceInfo) -> (u8, u8, u8, i32) {
@@ -535,7 +462,7 @@ pub(crate) fn run_level_monitor(args: &[String]) {
         }
         Err(error) => {
             println!("Direct input capture unavailable: {error}");
-            println!("Falling back to Windows endpoint meter.");
+            println!("Falling back to the endpoint meter.");
             None
         }
     };
@@ -569,10 +496,7 @@ fn monitor_hid_reports(duration: Duration) -> Result<(), String> {
     let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
     let mut devices = Vec::new();
 
-    for info in api
-        .device_list()
-        .filter(|device| is_supported_lighting_device(device))
-    {
+    for info in event_interfaces(&api) {
         if let Ok(device) = api.open_path(info.path()) {
             device
                 .set_blocking_mode(false)
@@ -616,7 +540,7 @@ fn monitor_hid_reports(duration: Duration) -> Result<(), String> {
         .map(|(_, _, caps)| {
             let len = caps
                 .as_ref()
-                .map(|caps| caps.InputReportByteLength as usize)
+                .map(|caps| caps.input_report_bytes as usize)
                 .unwrap_or(65)
                 .max(65);
             vec![0u8; len]
@@ -645,12 +569,12 @@ fn monitor_hid_reports(duration: Duration) -> Result<(), String> {
             }
         }
 
-        if let Ok(status) = mic_status() {
-            if last_volume != Some(status.volume) {
-                let elapsed = started.elapsed().as_millis();
-                println!("{elapsed:>6}ms core-audio mic-volume={}", status.volume);
-                last_volume = Some(status.volume);
-            }
+        if let Ok(status) = mic_status()
+            && last_volume != Some(status.volume)
+        {
+            let elapsed = started.elapsed().as_millis();
+            println!("{elapsed:>6}ms core-audio mic-volume={}", status.volume);
+            last_volume = Some(status.volume);
         }
 
         thread::sleep(Duration::from_millis(10));
@@ -720,6 +644,31 @@ pub(crate) fn spawn_hid_event_listener() -> Receiver<HidEvent> {
     receiver
 }
 
+/// Supported HID entries to read button events from, one per device path.
+///
+/// macOS lists every top-level collection of an interface under that interface's single
+/// path, so opening each entry would open the same device twice and deliver every report
+/// twice. Windows gives each collection its own path, so nothing is dropped there.
+fn event_interfaces(api: &hidapi::HidApi) -> Vec<&hidapi::DeviceInfo> {
+    first_per_key(
+        api.device_list()
+            .filter(|device| is_supported_lighting_device(device)),
+        |device| device.path().to_owned(),
+    )
+}
+
+/// Keep the first item for each key, preserving order.
+fn first_per_key<T, K: Eq + Hash>(
+    items: impl IntoIterator<Item = T>,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    let mut seen = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(key(item)))
+        .collect()
+}
+
 /// Open every supported lighting HID interface, or `None` if none could be opened.
 fn open_hid_event_devices() -> Option<Vec<hidapi::HidDevice>> {
     // A fresh context per attempt on purpose: `HidApi` caches its device list at
@@ -737,10 +686,7 @@ fn open_hid_event_devices() -> Option<Vec<hidapi::HidDevice>> {
     };
 
     let mut devices = Vec::new();
-    for info in api
-        .device_list()
-        .filter(|device| is_supported_lighting_device(device))
-    {
+    for info in event_interfaces(&api) {
         match api.open_path(info.path()) {
             Ok(device) => {
                 if let Err(error) = device.set_blocking_mode(false) {
@@ -884,7 +830,7 @@ pub(crate) fn pattern_description(pattern: PolarPattern) -> &'static str {
     }
 }
 
-fn hex_bytes(bytes: &[u8]) -> String {
+pub(crate) fn hex_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -932,6 +878,8 @@ pub(crate) fn stream_lighting_program_cancelable(
     } else {
         Some(program.effect)
     };
+    // The VU Meter's endpoint-meter fallback queries WASAPI from this thread.
+    #[cfg(windows)]
     let _com = if active_effect == Some(Effect::VuMeter) {
         match ComApartment::init() {
             Ok(com) => Some(com),
@@ -947,16 +895,7 @@ pub(crate) fn stream_lighting_program_cancelable(
     } else {
         None
     };
-    let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
-    let info = api
-        .device_list()
-        .filter(|device| is_supported_lighting_device(device))
-        .max_by_key(|device| lighting_device_score(device))
-        .ok_or(LightingError::NoDevice)?;
-
-    let device = api
-        .open_path(info.path())
-        .map_err(|error| LightingError::Hid(error.to_string()))?;
+    let port = LightingPort::open()?;
 
     let header = build_display_header_packet();
     let (frames, top_frames, bottom_frames) = build_program_frames(program)?;
@@ -993,8 +932,8 @@ pub(crate) fn stream_lighting_program_cancelable(
         } else {
             apply_light_target(frame, program.target)
         };
-        send_feature_packet(&device, &header, packet_log)?;
-        send_feature_packet(&device, &build_frame_packet(frame), packet_log)?;
+        port.send_feature(&header, packet_log)?;
+        port.send_feature(&build_frame_packet(frame), packet_log)?;
         thread::sleep(frame_delay);
     }
 
@@ -1105,7 +1044,7 @@ impl VuMeterState {
         let target = vu_target_level(direct_peak.max(endpoint_peak));
         self.level = smooth_vu_level(self.level, target);
         self.tick = self.tick.wrapping_add(1);
-        if self.tick % 50 == 0 {
+        if self.tick.is_multiple_of(50) {
             log_event(
                 "info",
                 "lighting.vu.level",
@@ -1330,9 +1269,36 @@ pub(crate) fn smooth_vu_level(current: f32, target: f32) -> f32 {
     current + (target - current) * coefficient
 }
 
+/// Map a raw capture peak onto the 0-1 meter range.
+///
+/// The platforms deliver very different sample scales for the same voice, so each has its
+/// own mapping. This one was tuned against the much smaller peaks the Windows capture
+/// stream produces; applied to CoreAudio samples it saturates below the mic's own noise
+/// floor and pins the meter at full.
+#[cfg(windows)]
 pub(crate) fn vu_target_level(raw_peak: f32) -> f32 {
     let normalized = ((raw_peak - 0.00002).max(0.0) * 1200.0).clamp(0.0, 1.0);
     normalized.powf(0.48)
+}
+
+/// Peak, in dBFS, that leaves the macOS meter empty: the silence floor of a QuadCast S at
+/// 80 % gain in a quiet room (measured -58 to -52 dBFS).
+#[cfg(target_os = "macos")]
+const VU_FLOOR_DBFS: f32 = -50.0;
+/// Peak that fills the macOS meter. Conversational speech peaked at -34 to -21 dBFS, so
+/// ordinary talking drives the flame near the top, as the Windows mapping does.
+#[cfg(target_os = "macos")]
+const VU_CEILING_DBFS: f32 = -30.0;
+
+/// Map a raw capture peak onto the 0-1 meter range, linearly in dB between the floor and
+/// the ceiling. CoreAudio hands cpal ordinary full-scale floats.
+#[cfg(target_os = "macos")]
+pub(crate) fn vu_target_level(raw_peak: f32) -> f32 {
+    if raw_peak.is_nan() || raw_peak <= 0.0 {
+        return 0.0;
+    }
+    let dbfs = 20.0 * raw_peak.log10();
+    ((dbfs - VU_FLOOR_DBFS) / (VU_CEILING_DBFS - VU_FLOOR_DBFS)).clamp(0.0, 1.0)
 }
 
 pub(crate) fn build_vu_frame(level: f32, brightness: u8, tick: u32) -> LightingFrame {
@@ -1409,108 +1375,29 @@ fn scale_color(color: [u8; 3], percent: u8) -> [u8; 3] {
     ]
 }
 
-fn send_feature_packet(
-    device: &hidapi::HidDevice,
-    packet: &[u8; 64],
-    packet_log: bool,
-) -> Result<(), LightingError> {
-    let mut with_report_id = [0u8; 65];
-    with_report_id[1..].copy_from_slice(packet);
-
-    let send_feature_id = || device.send_feature_report(&with_report_id);
-    let send_feature = || device.send_feature_report(packet);
-    let send_output_id = || device.write(&with_report_id).map(|_| ());
-    let send_output = || device.write(packet).map(|_| ());
-    let attempts: [(&str, &dyn Fn() -> hidapi::HidResult<()>); 4] = [
-        ("feature+id", &send_feature_id),
-        ("feature", &send_feature),
-        ("output+id", &send_output_id),
-        ("output", &send_output),
-    ];
-
-    let mut errors = Vec::new();
-    for (name, attempt) in attempts {
-        match attempt() {
-            Ok(()) => {
-                log_hid_packet_attempt(packet_log, name, true, packet, None);
-                return Ok(());
-            }
-            Err(error) => {
-                log_hid_packet_attempt(packet_log, name, false, packet, Some(error.to_string()));
-                errors.push(format!("{name}: {error}"));
-            }
-        }
-    }
-
-    Err(LightingError::Hid(errors.join("; ")))
-}
-
-fn read_feature_packet(device: &hidapi::HidDevice, packet_log: bool) -> Result<[u8; 64], String> {
-    let mut with_report_id = [0u8; 65];
-    let mut errors = Vec::new();
-    match device.get_feature_report(&mut with_report_id) {
-        Ok(length) if length >= 65 => {
-            let mut packet = [0u8; 64];
-            packet.copy_from_slice(&with_report_id[1..65]);
-            log_hid_packet_attempt(packet_log, "feature-read+id", true, &packet, None);
-            return Ok(packet);
-        }
-        Ok(length) => errors.push(format!("feature-read+id: short report length {length}")),
-        Err(error) => errors.push(format!("feature-read+id: {error}")),
-    }
-
-    let mut packet = [0u8; 64];
-    match device.get_feature_report(&mut packet) {
-        Ok(length) if length >= 64 => {
-            log_hid_packet_attempt(packet_log, "feature-read", true, &packet, None);
-            Ok(packet)
-        }
-        Ok(length) => Err(format!(
-            "Unable to read feature report. Short report length {length}. Previous errors: {}",
-            errors.join("; ")
-        )),
-        Err(error) => {
-            errors.push(format!("feature-read: {error}"));
-            Err(format!(
-                "Unable to read feature report: {}",
-                errors.join("; ")
-            ))
-        }
-    }
-}
-
 pub(crate) fn save_lighting_to_microphone(packet_log: bool) -> Result<(), LightingError> {
-    let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
-    let info = api
-        .device_list()
-        .filter(|device| is_supported_lighting_device(device))
-        .max_by_key(|device| lighting_device_score(device))
-        .ok_or(LightingError::NoDevice)?;
+    let port = LightingPort::open()?;
 
-    let device = api
-        .open_path(info.path())
-        .map_err(|error| LightingError::Hid(error.to_string()))?;
-
-    send_feature_packet(&device, &build_save_prepare_packet(), packet_log)?;
-    send_feature_packet(&device, &build_save_state_packet(), packet_log)?;
-    if let Err(error) = read_feature_packet(&device, packet_log) {
+    port.send_feature(&build_save_prepare_packet(), packet_log)?;
+    port.send_feature(&build_save_state_packet(), packet_log)?;
+    if let Err(error) = port.read_feature(packet_log) {
         log_event(
             "warn",
             "lighting.save.readback.error",
             &[("message", error)],
         );
     }
-    send_feature_packet(&device, &build_save_commit_packet(), packet_log)?;
-    if let Err(error) = read_feature_packet(&device, packet_log) {
+    port.send_feature(&build_save_commit_packet(), packet_log)?;
+    if let Err(error) = port.read_feature(packet_log) {
         log_event(
             "warn",
             "lighting.save.readback.error",
             &[("message", error)],
         );
     }
-    send_feature_packet(&device, &build_save_sentinel_packet(), packet_log)?;
-    send_feature_packet(&device, &build_save_state_packet(), packet_log)?;
-    if let Err(error) = read_feature_packet(&device, packet_log) {
+    port.send_feature(&build_save_sentinel_packet(), packet_log)?;
+    port.send_feature(&build_save_state_packet(), packet_log)?;
+    if let Err(error) = port.read_feature(packet_log) {
         log_event(
             "warn",
             "lighting.save.readback.error",
@@ -1533,43 +1420,13 @@ pub(crate) fn write_lighting_frame_once(
     frame: LightingFrame,
     packet_log: bool,
 ) -> Result<(), LightingError> {
-    let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
-    let info = api
-        .device_list()
-        .filter(|device| is_supported_lighting_device(device))
-        .max_by_key(|device| lighting_device_score(device))
-        .ok_or(LightingError::NoDevice)?;
-    let device = api
-        .open_path(info.path())
-        .map_err(|error| LightingError::Hid(error.to_string()))?;
-    send_feature_packet(&device, &build_display_header_packet(), packet_log)?;
-    send_feature_packet(&device, &build_frame_packet(frame), packet_log)
+    let port = LightingPort::open()?;
+    port.send_feature(&build_display_header_packet(), packet_log)?;
+    port.send_feature(&build_frame_packet(frame), packet_log)
 }
 
 pub(crate) fn live_mute_lighting_color(is_live: bool) -> [u8; 3] {
     if is_live { [0, 255, 70] } else { [255, 0, 28] }
-}
-
-fn log_hid_packet_attempt(
-    enabled: bool,
-    transport: &str,
-    success: bool,
-    packet: &[u8; 64],
-    error: Option<String>,
-) {
-    if !enabled {
-        return;
-    }
-
-    let mut fields = vec![
-        ("transport", transport.to_string()),
-        ("success", success.to_string()),
-        ("packet", hex_bytes(packet)),
-    ];
-    if let Some(error) = error {
-        fields.push(("error", error));
-    }
-    log_event("info", "hid.packet.write", &fields);
 }
 
 #[cfg(test)]
@@ -1624,7 +1481,40 @@ mod tests {
 
     #[test]
     fn vu_target_level_is_monotonic() {
-        assert!(vu_target_level(0.0001) < vu_target_level(0.01));
+        // 0.1 sits inside both platforms' ranges; 0.01 is at the macOS floor.
+        assert!(vu_target_level(0.0001) < vu_target_level(0.1));
+    }
+
+    /// Levels measured on a QuadCast S under macOS at 80 % mic gain.
+    #[cfg(target_os = "macos")]
+    mod macos_vu_calibration {
+        use super::*;
+
+        #[test]
+        fn silence_noise_floor_reads_empty() {
+            // Quiet-room silence: 0.0012-0.0024 (-58 to -52 dBFS).
+            assert_eq!(vu_target_level(0.0024), 0.0);
+        }
+
+        #[test]
+        fn quiet_speech_lands_mid_scale() {
+            // -40 dBFS, halfway between floor and ceiling.
+            let level = vu_target_level(0.01);
+            assert!((0.4..0.6).contains(&level), "quiet speech level {level}");
+        }
+
+        #[test]
+        fn conversational_speech_fills_the_meter() {
+            // Talking peaked at 0.02-0.03 (-34 to -30 dBFS) and louder.
+            assert!(vu_target_level(0.02) > 0.75);
+            assert!(vu_target_level(0.032) > 0.99);
+        }
+
+        #[test]
+        fn silent_or_invalid_samples_read_empty() {
+            assert_eq!(vu_target_level(0.0), 0.0);
+            assert_eq!(vu_target_level(f32::NAN), 0.0);
+        }
     }
 
     #[test]
@@ -1657,6 +1547,15 @@ mod tests {
             decode_hid_event(&[0x05, 0x11, 2]),
             Some(HidEvent::Pattern(_))
         ));
+    }
+
+    #[test]
+    fn duplicate_device_paths_are_opened_once() {
+        let entries = [("path-a", 0x000c), ("path-a", 0xffff), ("path-b", 0xff90)];
+
+        let kept = first_per_key(entries, |(path, _)| *path);
+
+        assert_eq!(kept, [("path-a", 0x000c), ("path-b", 0xff90)]);
     }
 
     #[test]

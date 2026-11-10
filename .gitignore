@@ -2,6 +2,7 @@
 /target-verify/
 /target-build/
 /diagnostics-test/
+/dist/
 *.pdb
 *.ilk
 *.exe

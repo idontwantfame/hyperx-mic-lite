@@ -22,6 +22,7 @@ use windows::Win32::{
 };
 use windows::core::PCWSTR;
 
+use super::glyph::{GLYPH_SIZE, GlyphPart, glyph_part};
 use crate::{
     constants::{TRAY_MENU_EXIT, TRAY_MENU_OPEN, TRAY_UID},
     logging::log_event,
@@ -165,7 +166,7 @@ fn run_tray_message_loop() -> Result<(), String> {
 /// Transparency comes from the 1bpp AND mask; the 32bpp XOR bitmap carries the colours.
 /// Both bitmaps are stored bottom-up as GDI expects.
 fn create_app_icon() -> Option<HICON> {
-    const SIZE: usize = 32;
+    const SIZE: usize = GLYPH_SIZE;
     let mut xor = vec![0u8; SIZE * SIZE * 4];
     let mut and = vec![0xffu8; (SIZE / 8) * SIZE]; // start fully transparent
 
@@ -180,31 +181,18 @@ fn create_app_icon() -> Option<HICON> {
         and[byte] &= !(0x80u8 >> (x % 8)); // clear mask bit => opaque pixel
     };
 
-    let rounded = |x: usize, y: usize, x0: usize, y0: usize, x1: usize, y1: usize, rad: f32| {
-        if x < x0 || x > x1 || y < y0 || y > y1 {
-            return false;
-        }
-        let cxl = x0 as f32 + rad;
-        let cxr = x1 as f32 - rad;
-        let cyt = y0 as f32 + rad;
-        let cyb = y1 as f32 - rad;
-        let dx = (cxl - x as f32).max(0.0).max(x as f32 - cxr);
-        let dy = (cyt - y as f32).max(0.0).max(y as f32 - cyb);
-        dx * dx + dy * dy <= rad * rad + 0.5
-    };
-
     for y in 0..SIZE {
         for x in 0..SIZE {
-            if rounded(x, y, 11, 3, 20, 19, 4.5) {
-                // Capsule: vertical gradient from red to pink (matches the lighting theme).
-                let t = ((y as f32 - 3.0) / 16.0).clamp(0.0, 1.0);
-                let g = (32.0 * (1.0 - t)) as u8;
-                let b = (16.0 + 138.0 * t) as u8;
-                plot(x, y, 255, g, b);
-            } else if (15..=16).contains(&x) && (19..=24).contains(&y) {
-                plot(x, y, 210, 214, 218); // stem
-            } else if rounded(x, y, 9, 25, 22, 27, 2.0) {
-                plot(x, y, 210, 214, 218); // base
+            match glyph_part(x, y) {
+                Some(GlyphPart::Capsule) => {
+                    // Vertical gradient from red to pink (matches the lighting theme).
+                    let t = ((y as f32 - 3.0) / 16.0).clamp(0.0, 1.0);
+                    let g = (32.0 * (1.0 - t)) as u8;
+                    let b = (16.0 + 138.0 * t) as u8;
+                    plot(x, y, 255, g, b);
+                }
+                Some(GlyphPart::Stand) => plot(x, y, 210, 214, 218),
+                None => {}
             }
         }
     }

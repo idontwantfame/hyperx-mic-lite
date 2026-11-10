@@ -1,4 +1,4 @@
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "macos"))]
 #![windows_subsystem = "windows"]
 
 fn main() {

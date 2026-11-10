@@ -1,6 +1,6 @@
 # HyperX Mic Lite
 
-Lightweight Windows control software for the HyperX QuadCast S. It replaces the useful microphone, lighting, startup, diagnostics, service, and Home Assistant pieces without needing the full NGENUITY stack.
+Lightweight Windows and macOS control software for the HyperX QuadCast S. It replaces the useful microphone, lighting, startup, diagnostics, service, and Home Assistant pieces without needing the full NGENUITY stack.
 
 ![HyperX Mic Lite GUI](assets/hyperx-mic-lite.png)
 
@@ -43,6 +43,15 @@ Run the GUI:
 ```
 
 Running with no arguments starts the GUI. If launched from a terminal, it also prints useful command examples.
+
+On macOS, build the app bundle instead (see [macOS](#macos)):
+
+```sh
+scripts/bundle-macos.sh
+open "dist/HyperX Mic Lite.app"
+```
+
+The CLI commands below work the same on macOS with `./target/release/hyperx-mic-lite`, or with the binary inside the bundle at `"dist/HyperX Mic Lite.app/Contents/MacOS/hyperx-mic-lite"`.
 
 ## Useful CLI Commands
 
@@ -178,7 +187,11 @@ Per-user GUI startup does not need admin:
 
 Default startup mode is minimized. Use `--normal` to open visibly at login.
 
+On Windows this writes the per-user `Run` registry key. On macOS it writes the LaunchAgent `~/Library/LaunchAgents/local.hyperx-mic-lite.gui.plist`, which launches whichever binary ran `startup install`, so run it from the app bundle you intend to keep. Both take effect at the next login.
+
 ## Windows Service
+
+Windows only; `service` and `eventlog` report an error on macOS.
 
 The service is intentionally narrow. It owns boot-time microphone restore, lifecycle/status, health heartbeat, and Event Viewer setup. The logged-in user session owns GUI rendering, tray behavior, interactive lighting streams, and HID events used by the UI.
 
@@ -195,20 +208,40 @@ Install/uninstall normally require an elevated terminal. Windows services run in
 
 ## Diagnostics And Logs
 
-The app writes structured JSONL logs under the user app data directory. Diagnostics export includes:
+The app writes structured JSONL logs under the user app data directory: `%APPDATA%\HyperXMicLite` on Windows, `~/Library/Application Support/HyperXMicLite` on macOS. Diagnostics export includes:
 
 - Manifest with app version and paths.
 - Redacted config.
 - Recent app log.
-- Service health JSON.
-- Core Audio device/status JSON.
-- HID report-size details for supported lighting interfaces.
+- Service health JSON (Windows).
+- Audio device/status JSON.
+- HID interface details for supported lighting interfaces (report sizes on Windows).
 
 MQTT passwords, tokens, secrets, local paths, and device IDs are redacted in diagnostics exports.
 
+## macOS
+
+Requirements: macOS 11 or later, a Rust toolchain, and the Xcode command line tools (`xcode-select --install`). The bundle script uses only tools that ship with macOS.
+
+```sh
+scripts/bundle-macos.sh                      # dist/HyperX Mic Lite.app for this Mac
+scripts/bundle-macos.sh --universal --zip    # Apple silicon + Intel, plus a zip
+```
+
+`--universal` needs both targets: `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
+
+Run the GUI from the bundle rather than the bare binary. The bundle carries the microphone usage description macOS requires before the input meter and VU Meter lighting can read the mic; on first launch macOS asks for microphone access. The bundle is ad-hoc signed and not notarized, so a downloaded copy has to be opened once with right-click > Open.
+
+How the platforms differ:
+
+- Audio controls use CoreAudio. macOS shows the QuadCast S as two devices with the same name, an input and an output, and exposes the same USB Audio Class controls as properties: mic level and mute on the input, monitoring (sidetone) as the play-through level and mute, and headphone level and mute on the output. Levels are written in dB over the same ranges as on Windows.
+- Lighting packets go to the controller as raw USB `SET_REPORT` control transfers through IOUSBHost. macOS's HID driver declines the lighting interface (it has no interrupt-in endpoint), so hidapi cannot see it there. Mute and polar-pattern button events still come through hidapi.
+- Hiding to the tray hides to a menu bar icon. "Open logs" opens the log in Console.app.
+- There is no background service, Event Viewer source, or input endpoint meter; the meter always reads from the capture stream.
+
 ## Developer Notes
 
-The project is Windows-only.
+The project builds on Windows and macOS. Platform code lives in per-platform modules (`audio/wasapi.rs` and `audio/core_audio.rs`, `devices/`, `tray/`, `startup/`, `lighting_port/`) behind the same functions.
 
 Recommended local toolchain:
 
@@ -223,14 +256,16 @@ The build script embeds `resources/hyperx_messages.mc` when `windmc` and `windre
 
 ## Release Process
 
-Use the `Release` GitHub Actions workflow. It accepts a semantic version, updates `Cargo.toml` and `Cargo.lock`, commits `Release vX.Y.Z`, tags `vX.Y.Z`, builds the Windows release binary, creates a zip package, generates a SHA-256 checksum file, uploads workflow artifacts, and publishes a GitHub Release.
+Use the `Release` GitHub Actions workflow. It accepts a semantic version, updates `Cargo.toml` and `Cargo.lock`, commits `Release vX.Y.Z`, tags `vX.Y.Z`, builds the Windows release binary and a universal macOS app bundle, creates zip packages, generates SHA-256 checksum files, uploads workflow artifacts, and publishes a GitHub Release.
 
 Release artifacts:
 
 - `hyperx-mic-lite-vX.Y.Z-windows-x86_64-msvc.zip`
 - `hyperx-mic-lite-vX.Y.Z-windows-x86_64-msvc.zip.sha256`
+- `hyperx-mic-lite-vX.Y.Z-macos-universal.zip`
+- `hyperx-mic-lite-vX.Y.Z-macos-universal.zip.sha256`
 
-The zip contains only `hyperx-mic-lite.exe`.
+The Windows zip contains only `hyperx-mic-lite.exe`; the macOS zip contains `HyperX Mic Lite.app`.
 
 ## Protocol Notes
 

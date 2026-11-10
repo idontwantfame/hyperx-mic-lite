@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -71,7 +71,7 @@ fn main() {
     println!("cargo:rustc-link-arg={}", resource_object.display());
 }
 
-fn append_icon_resource(resource_script: &PathBuf, icon_file: &PathBuf) {
+fn append_icon_resource(resource_script: &Path, icon_file: &Path) {
     let icon_path = icon_file.display().to_string().replace('\\', "/");
     match fs::OpenOptions::new().append(true).open(resource_script) {
         Ok(mut file) => {
@@ -90,10 +90,10 @@ fn emit_build_metadata() {
     println!("cargo:rerun-if-env-changed=HYPERX_BUILD_REVISION");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/tags");
-    if let Ok(head) = fs::read_to_string(".git/HEAD") {
-        if let Some(ref_path) = head.strip_prefix("ref: ").map(str::trim) {
-            println!("cargo:rerun-if-changed=.git/{ref_path}");
-        }
+    if let Ok(head) = fs::read_to_string(".git/HEAD")
+        && let Some(ref_path) = head.strip_prefix("ref: ").map(str::trim)
+    {
+        println!("cargo:rerun-if-changed=.git/{ref_path}");
     }
 
     let revision = env::var("HYPERX_BUILD_REVISION")

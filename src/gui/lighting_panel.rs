@@ -294,12 +294,11 @@ impl MicLiteApp {
                             .changed()
                         {
                             self.save_config_snapshot();
-                            if self.lighting.live_when_muted {
-                                if let Some(is_live) =
+                            if self.lighting.live_when_muted
+                                && let Some(is_live) =
                                     self.status.as_ref().map(|status| !status.muted)
-                                {
-                                    self.apply_live_mute_lighting(is_live);
-                                }
+                            {
+                                self.apply_live_mute_lighting(is_live);
                             }
                         }
 
