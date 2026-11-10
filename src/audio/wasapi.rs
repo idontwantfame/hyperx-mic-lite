@@ -176,7 +176,7 @@ fn activate_part_interface<T: Interface>(part: &IPart) -> WinResult<T> {
     // SAFETY: part is a valid IPart; on success Activate writes an owned pointer implementing
     // T::IID into raw, and Type::from_abi takes ownership of exactly that pointer.
     unsafe {
-        part.Activate(CLSCTX_ALL.0 as u32, &T::IID, Some(&mut raw))?;
+        part.Activate(CLSCTX_ALL.0, &T::IID, Some(&mut raw))?;
         Type::from_abi(raw)
     }
 }
@@ -267,10 +267,10 @@ pub(super) fn print_audio_topology(flow: EndpointFlow) -> WinResult<()> {
         let connector_count = topology.GetConnectorCount()?;
         for index in 0..connector_count {
             let connector = topology.GetConnector(index)?;
-            if let Ok(connected) = connector.GetConnectedTo() {
-                if let Ok(part) = connected.cast() {
-                    print_topology_part(&part, 0, &mut visited)?;
-                }
+            if let Ok(connected) = connector.GetConnectedTo()
+                && let Ok(part) = connected.cast()
+            {
+                print_topology_part(&part, 0, &mut visited)?;
             }
         }
     }
@@ -286,21 +286,20 @@ fn find_topology_part(topology: &IDeviceTopology, id: u32) -> WinResult<Option<I
         let subunit_count = topology.GetSubunitCount()?;
         for index in 0..subunit_count {
             let subunit = topology.GetSubunit(index)?;
-            if let Ok(part) = subunit.cast() {
-                if let Some(found) = find_topology_part_from(&part, id, &mut visited)? {
-                    return Ok(Some(found));
-                }
+            if let Ok(part) = subunit.cast()
+                && let Some(found) = find_topology_part_from(&part, id, &mut visited)?
+            {
+                return Ok(Some(found));
             }
         }
         let connector_count = topology.GetConnectorCount()?;
         for index in 0..connector_count {
             let connector = topology.GetConnector(index)?;
-            if let Ok(connected) = connector.GetConnectedTo() {
-                if let Ok(part) = connected.cast() {
-                    if let Some(found) = find_topology_part_from(&part, id, &mut visited)? {
-                        return Ok(Some(found));
-                    }
-                }
+            if let Ok(connected) = connector.GetConnectedTo()
+                && let Ok(part) = connected.cast()
+                && let Some(found) = find_topology_part_from(&part, id, &mut visited)?
+            {
+                return Ok(Some(found));
             }
         }
     }
@@ -326,20 +325,20 @@ fn find_topology_part_from(
         if let Ok(parts) = part.EnumPartsIncoming() {
             let count = parts.GetCount().unwrap_or(0);
             for index in 0..count {
-                if let Ok(child) = parts.GetPart(index) {
-                    if let Some(found) = find_topology_part_from(&child, id, visited)? {
-                        return Ok(Some(found));
-                    }
+                if let Ok(child) = parts.GetPart(index)
+                    && let Some(found) = find_topology_part_from(&child, id, visited)?
+                {
+                    return Ok(Some(found));
                 }
             }
         }
         if let Ok(parts) = part.EnumPartsOutgoing() {
             let count = parts.GetCount().unwrap_or(0);
             for index in 0..count {
-                if let Ok(child) = parts.GetPart(index) {
-                    if let Some(found) = find_topology_part_from(&child, id, visited)? {
-                        return Ok(Some(found));
-                    }
+                if let Ok(child) = parts.GetPart(index)
+                    && let Some(found) = find_topology_part_from(&child, id, visited)?
+                {
+                    return Ok(Some(found));
                 }
             }
         }

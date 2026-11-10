@@ -179,7 +179,7 @@ fn run_tray_message_loop() -> Result<(), String> {
 fn create_app_icon() -> Option<HICON> {
     const SIZE: usize = GLYPH_SIZE;
     let mut xor = vec![0u8; SIZE * SIZE * 4];
-    let mut and = vec![0xffu8; (SIZE / 8) * SIZE]; // start fully transparent
+    let mut and = [0xffu8; (SIZE / 8) * SIZE]; // start fully transparent
 
     let mut plot = |x: usize, y: usize, r: u8, g: u8, b: u8| {
         let row = SIZE - 1 - y; // bottom-up
@@ -203,8 +203,7 @@ fn create_app_icon() -> Option<HICON> {
                     plot(x, y, 255, g, b);
                 }
                 Some(GlyphPart::Stand) => plot(x, y, 210, 214, 218),
-                // The live glyph has no slash.
-                Some(GlyphPart::Slash) | None => {}
+                None => {}
             }
         }
     }

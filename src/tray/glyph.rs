@@ -10,20 +10,27 @@ pub(super) enum GlyphPart {
     Capsule,
     /// The stem and base under it.
     Stand,
-    /// The diagonal stroke across a muted microphone.
+    /// The diagonal stroke across a muted microphone. Only the macOS menu bar icon shows
+    /// mute state.
+    #[cfg(target_os = "macos")]
     Slash,
 }
 
 /// Ends of the mute slash, from top right to bottom left.
+#[cfg(target_os = "macos")]
 const SLASH_START: (f32, f32) = (27.0, 4.0);
+#[cfg(target_os = "macos")]
 const SLASH_END: (f32, f32) = (5.0, 28.0);
 /// Half the slash's thickness, and how far from its centre line the glyph is cleared so the
 /// slash stands apart from the microphone behind it.
+#[cfg(target_os = "macos")]
 const SLASH_HALF_WIDTH: f32 = 1.4;
+#[cfg(target_os = "macos")]
 const SLASH_CLEARANCE: f32 = 3.2;
 
 /// The part of the muted glyph covering pixel (`x`, `y`): the live glyph with a slash
 /// through it and a transparent margin either side of the slash.
+#[cfg(target_os = "macos")]
 pub(super) fn muted_glyph_part(x: usize, y: usize) -> Option<GlyphPart> {
     let (dx, dy) = (SLASH_END.0 - SLASH_START.0, SLASH_END.1 - SLASH_START.1);
     let length_squared = dx * dx + dy * dy;
@@ -86,6 +93,7 @@ mod tests {
         assert_eq!(glyph_part(12, 26), Some(GlyphPart::Stand));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn muted_glyph_draws_a_slash_across_the_microphone() {
         // A point on the slash, where the live glyph is empty.
@@ -93,6 +101,7 @@ mod tests {
         assert_eq!(muted_glyph_part(26, 6), Some(GlyphPart::Slash));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn muted_glyph_clears_a_gap_beside_the_slash() {
         // Capsule pixel just off the slash line: drawn when live, cleared when muted.
@@ -100,6 +109,7 @@ mod tests {
         assert_eq!(muted_glyph_part(16, 13), None);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn muted_glyph_keeps_the_rest_of_the_microphone() {
         assert_eq!(muted_glyph_part(12, 8), Some(GlyphPart::Capsule));

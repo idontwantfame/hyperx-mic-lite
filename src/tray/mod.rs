@@ -27,6 +27,9 @@ pub(crate) struct TrayState {
 }
 
 /// A menu choice for the GUI to carry out. Open and Quit have their own flags.
+///
+/// Only the macOS menu offers these so far; the Windows tray menu has just Open and Exit.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TrayCommand {
     ToggleMute,
