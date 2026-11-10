@@ -9,7 +9,9 @@ use std::{
 };
 
 use crate::{
-    gui_widgets::{color_swatch, percent_slider, section_label, target_button},
+    gui_widgets::{
+        color_swatch, primary_button, secondary_button, section_label, segmented, value_slider,
+    },
     lighting::{
         LightingProgram, StreamDuration, live_mute_lighting_color, save_lighting_to_microphone,
         stream_lighting_program_cancelable, write_solid_lighting_once,
@@ -18,7 +20,7 @@ use crate::{
     model::{Effect, LightTarget},
 };
 
-use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice, notice_color};
+use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice, notice_color, theme};
 
 impl MicLiteApp {
     pub(super) fn apply_live_mute_lighting(&mut self, is_live: bool) {
@@ -48,18 +50,8 @@ impl MicLiteApp {
         });
     }
 
-    pub(super) fn apply_lighting_to_microphone(&mut self) {
-        if self.lighting_device.is_none() {
-            log_event("warn", "lighting.apply.no_device", &[]);
-            self.lighting_notice = Some(UiNotice {
-                severity: NoticeSeverity::Warning,
-                message:
-                    "Lighting controller not detected. Connect the QuadCast S and close NGENUITY."
-                        .to_string(),
-            });
-            return;
-        }
-
+    /// The program the current lighting settings describe, exactly as Apply streams it.
+    pub(super) fn lighting_program(&self) -> LightingProgram {
         let colors = if self.lighting.effect == Effect::Solid {
             self.lighting
                 .colors
@@ -75,7 +67,7 @@ impl MicLiteApp {
                 .collect()
         };
 
-        let program = LightingProgram {
+        LightingProgram {
             effect: self.lighting.effect,
             target: self.lighting.target,
             split_layers: self.lighting.split_layers,
@@ -94,7 +86,22 @@ impl MicLiteApp {
             } else {
                 None
             },
-        };
+        }
+    }
+
+    pub(super) fn apply_lighting_to_microphone(&mut self) {
+        if self.lighting_device.is_none() {
+            log_event("warn", "lighting.apply.no_device", &[]);
+            self.lighting_notice = Some(UiNotice {
+                severity: NoticeSeverity::Warning,
+                message:
+                    "Lighting controller not detected. Connect the QuadCast S and close NGENUITY."
+                        .to_string(),
+            });
+            return;
+        }
+
+        let program = self.lighting_program();
         log_event(
             "info",
             "lighting.apply.start",
@@ -178,171 +185,184 @@ impl MicLiteApp {
         });
     }
 
-    pub(super) fn ui_lighting_panel(&mut self, ui: &mut egui::Ui, gap: f32) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.allocate_ui(egui::vec2(174.0, 340.0), |ui| {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        section_label(ui, "LIGHTING EFFECTS");
-                        ui.add_space(2.0);
-                        for effect in [
-                            Effect::Wave,
-                            Effect::Solid,
-                            Effect::Cycle,
-                            Effect::Pulse,
-                            Effect::Blink,
-                            Effect::Lightning,
-                            Effect::VuMeter,
-                        ] {
-                            if ui
-                                .selectable_label(self.lighting.effect == effect, effect.label())
-                                .clicked()
-                            {
-                                self.lighting.effect = effect;
-                                self.save_config_snapshot();
-                            }
-                        }
+    /// Effect choice. Split mode replaces the whole-mic effect with one per half, so the
+    /// two never appear together and the one that will run is always the one on screen.
+    pub(super) fn ui_effect_panel(&mut self, ui: &mut egui::Ui) {
+        if segmented(
+            ui,
+            "lighting_mode",
+            &mut self.lighting.split_layers,
+            &[(false, "Whole mic"), (true, "Split")],
+        ) {
+            self.save_config_snapshot();
+        }
+        ui.add_space(8.0);
 
-                        ui.add_space(12.0);
-                        section_label(ui, "TARGET");
-                        let mut target_changed = false;
-                        ui.horizontal(|ui| {
-                            target_changed |=
-                                target_button(ui, &mut self.lighting.target, LightTarget::All);
-                            target_changed |=
-                                target_button(ui, &mut self.lighting.target, LightTarget::Top);
-                            target_changed |=
-                                target_button(ui, &mut self.lighting.target, LightTarget::Bottom);
-                        });
-                        if target_changed {
-                            self.save_config_snapshot();
-                        }
+        if self.lighting.split_layers {
+            self.ui_layer_effect_picker(ui, "Top half", true);
+            ui.add_space(4.0);
+            self.ui_layer_effect_picker(ui, "Bottom half", false);
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("VU Meter needs Whole mic.")
+                    .size(11.0)
+                    .color(theme::TEXT_DIM),
+            );
+        } else {
+            self.ui_effect_grid(ui);
+            ui.add_space(8.0);
+            section_label(ui, "Target");
+            if segmented(
+                ui,
+                "lighting_target",
+                &mut self.lighting.target,
+                &[LightTarget::All, LightTarget::Top, LightTarget::Bottom]
+                    .map(|target| (target, target.label())),
+            ) {
+                self.save_config_snapshot();
+            }
+        }
 
-                        ui.add_space(10.0);
-                        if ui
-                            .checkbox(&mut self.lighting.split_layers, "Split top/bottom")
-                            .changed()
-                        {
-                            self.save_config_snapshot();
-                        }
-                        if self.lighting.split_layers {
-                            self.ui_layer_effect_picker(ui, "Top", true);
-                            self.ui_layer_effect_picker(ui, "Bottom", false);
-                        }
-                    });
-                });
+        ui.add_space(10.0);
+        if ui
+            .checkbox(&mut self.lighting.live_when_muted, "Show mute state")
+            .on_hover_text("Turn the lights green while live and red while muted")
+            .changed()
+        {
+            self.save_config_snapshot();
+            if self.lighting.live_when_muted
+                && let Some(is_live) = self.status.as_ref().map(|status| !status.muted)
+            {
+                self.apply_live_mute_lighting(is_live);
+            }
+        }
+    }
 
-                ui.add_space(gap);
-                ui.allocate_ui(egui::vec2(196.0, 340.0), |ui| {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        section_label(ui, "COLOR");
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            for index in 0..self.lighting.colors.len() {
-                                let color = self.lighting.colors[index];
-                                let selected = self.lighting.selected_color == index;
-                                let response = color_swatch(ui, color, selected);
-                                let popup_id = response.id.with("color_picker");
-                                if response.double_clicked() {
-                                    self.lighting.selected_color = index;
-                                    egui::Popup::open_id(ui.ctx(), popup_id);
-                                    self.save_config_snapshot();
-                                } else if response.clicked() {
-                                    self.lighting.selected_color = index;
-                                    self.save_config_snapshot();
-                                }
-
-                                let mut color_changed = false;
-                                egui::Popup::from_response(&response)
-                                    .id(popup_id)
-                                    .open_memory(None)
-                                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                                    .show(|ui| {
-                                        ui.spacing_mut().slider_width = 275.0;
-                                        color_changed = egui::color_picker::color_picker_color32(
-                                            ui,
-                                            &mut self.lighting.colors[index],
-                                            egui::color_picker::Alpha::Opaque,
-                                        );
-                                    });
-                                if color_changed {
-                                    self.lighting.selected_color = index;
-                                    self.save_config_snapshot();
-                                }
-                            }
-                        });
-
-                        ui.add_space(8.0);
-                        section_label(ui, "BRIGHTNESS");
-                        if percent_slider(ui, &mut self.lighting.brightness, 160.0).changed() {
-                            self.save_config_snapshot();
-                        }
-                        section_label(ui, "SPEED");
-                        if percent_slider(ui, &mut self.lighting.speed, 160.0).changed() {
-                            self.save_config_snapshot();
-                        }
-                        section_label(ui, "OPACITY");
-                        if percent_slider(ui, &mut self.lighting.opacity, 160.0).changed() {
-                            self.save_config_snapshot();
-                        }
-                        if ui
-                            .checkbox(&mut self.lighting.live_when_muted, "Lights show live state")
-                            .changed()
-                        {
-                            self.save_config_snapshot();
-                            if self.lighting.live_when_muted
-                                && let Some(is_live) =
-                                    self.status.as_ref().map(|status| !status.muted)
-                            {
-                                self.apply_live_mute_lighting(is_live);
-                            }
-                        }
-
-                        ui.add_space(8.0);
-                        if ui
-                            .add_sized([160.0, 26.0], egui::Button::new("Apply"))
-                            .clicked()
-                        {
-                            self.apply_lighting_to_microphone();
-                        }
-                        if ui
-                            .add_sized([160.0, 26.0], egui::Button::new("Stop Stream"))
-                            .clicked()
-                        {
-                            if let Some(cancel) = &self.lighting_cancel {
-                                cancel.store(true, Ordering::Relaxed);
-                            }
-                            self.lighting_cancel = None;
-                            // Explicit stop, so do not bring the stream back on the next
-                            // reconnect.
-                            self.lighting_stream_wanted = false;
-                            log_event("info", "lighting.apply.stop", &[]);
-                        }
-                        if ui
-                            .add_sized([160.0, 26.0], egui::Button::new("Save to Mic"))
-                            .on_hover_text("Experimental persistent device write")
-                            .clicked()
-                        {
-                            self.save_lighting_to_microphone();
-                        }
-                        if let Some(notice) = &self.lighting_notice {
-                            ui.add_space(6.0);
-                            ui.colored_label(notice_color(notice.severity), &notice.message);
-                        } else if self.lighting_device.is_none() {
-                            ui.add_space(6.0);
-                            ui.colored_label(
-                                notice_color(NoticeSeverity::Warning),
-                                "Lighting controls need the QuadCast S HID interface.",
-                            );
-                        }
-                    });
-                });
+    fn ui_effect_grid(&mut self, ui: &mut egui::Ui) {
+        let effects = [
+            Effect::Wave,
+            Effect::Solid,
+            Effect::Cycle,
+            Effect::Pulse,
+            Effect::Blink,
+            Effect::Lightning,
+            Effect::VuMeter,
+        ];
+        let gap = 6.0;
+        let full_width = ui.available_width();
+        for row in effects.chunks(2) {
+            // A lone last effect spans the row instead of leaving a hole beside it.
+            let chip_width = (full_width - gap * (row.len() - 1) as f32) / row.len() as f32;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for &effect in row {
+                    let selected = self.lighting.effect == effect;
+                    if ui
+                        .add_sized(
+                            [chip_width, 28.0],
+                            egui::Button::new(effect.label()).selected(selected),
+                        )
+                        .clicked()
+                    {
+                        self.lighting.effect = effect;
+                        self.save_config_snapshot();
+                    }
+                }
             });
+        }
+    }
+
+    pub(super) fn ui_color_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for index in 0..self.lighting.colors.len() {
+                let color = self.lighting.colors[index];
+                let selected = self.lighting.selected_color == index;
+                let response = color_swatch(ui, color, selected);
+                let popup_id = response.id.with("color_picker");
+                if response.double_clicked() {
+                    self.lighting.selected_color = index;
+                    egui::Popup::open_id(ui.ctx(), popup_id);
+                    self.save_config_snapshot();
+                } else if response.clicked() {
+                    self.lighting.selected_color = index;
+                    self.save_config_snapshot();
+                }
+
+                let mut color_changed = false;
+                egui::Popup::from_response(&response)
+                    .id(popup_id)
+                    .open_memory(None)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.spacing_mut().slider_width = 275.0;
+                        color_changed = egui::color_picker::color_picker_color32(
+                            ui,
+                            &mut self.lighting.colors[index],
+                            egui::color_picker::Alpha::Opaque,
+                        );
+                    });
+                if color_changed {
+                    self.lighting.selected_color = index;
+                    self.save_config_snapshot();
+                }
+            }
         });
+        ui.label(
+            egui::RichText::new("Double-click a color to change it.")
+                .size(11.0)
+                .color(theme::TEXT_DIM),
+        );
+
+        ui.add_space(4.0);
+        if value_slider(ui, "Brightness", &mut self.lighting.brightness).changed() {
+            self.save_config_snapshot();
+        }
+        ui.add_space(4.0);
+        if value_slider(ui, "Speed", &mut self.lighting.speed).changed() {
+            self.save_config_snapshot();
+        }
+
+        ui.add_space(8.0);
+        let width = ui.available_width();
+        if primary_button(ui, "Apply", width).clicked() {
+            self.apply_lighting_to_microphone();
+        }
+        ui.horizontal(|ui| {
+            let gap = 6.0;
+            ui.spacing_mut().item_spacing.x = gap;
+            let half = (width - gap) / 2.0;
+            if secondary_button(ui, "Stop", half).clicked() {
+                if let Some(cancel) = &self.lighting_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                self.lighting_cancel = None;
+                // Explicit stop, so do not bring the stream back on the next reconnect.
+                self.lighting_stream_wanted = false;
+                log_event("info", "lighting.apply.stop", &[]);
+            }
+            if secondary_button(ui, "Save to mic", half)
+                .on_hover_text("Write the effect into the mic's memory (experimental)")
+                .clicked()
+            {
+                self.save_lighting_to_microphone();
+            }
+        });
+        if let Some(notice) = &self.lighting_notice {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(&notice.message)
+                    .size(11.5)
+                    .color(notice_color(notice.severity)),
+            );
+        } else if self.lighting_device.is_none() {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Lighting needs the QuadCast S controller.")
+                    .size(11.5)
+                    .color(notice_color(NoticeSeverity::Warning)),
+            );
+        }
     }
 
     fn ui_layer_effect_picker(&mut self, ui: &mut egui::Ui, label: &str, top: bool) {
@@ -352,22 +372,24 @@ impl MicLiteApp {
             self.lighting.bottom_effect
         };
         ui.horizontal(|ui| {
-            ui.add_sized([46.0, 20.0], egui::Label::new(label));
-            egui::ComboBox::from_id_salt(("layer_effect", label))
-                .selected_text(value.label())
-                .width(92.0)
-                .show_ui(ui, |ui| {
-                    for effect in [
-                        Effect::Solid,
-                        Effect::Wave,
-                        Effect::Cycle,
-                        Effect::Pulse,
-                        Effect::Blink,
-                        Effect::Lightning,
-                    ] {
-                        ui.selectable_value(&mut value, effect, effect.label());
-                    }
-                });
+            ui.label(egui::RichText::new(label).color(theme::TEXT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt(("layer_effect", label))
+                    .selected_text(value.label())
+                    .width(96.0)
+                    .show_ui(ui, |ui| {
+                        for effect in [
+                            Effect::Solid,
+                            Effect::Wave,
+                            Effect::Cycle,
+                            Effect::Pulse,
+                            Effect::Blink,
+                            Effect::Lightning,
+                        ] {
+                            ui.selectable_value(&mut value, effect, effect.label());
+                        }
+                    });
+            });
         });
         if top && value != self.lighting.top_effect {
             self.lighting.top_effect = value;

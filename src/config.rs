@@ -128,7 +128,6 @@ pub(crate) struct LightingConfig {
     pub(crate) bottom_effect: String,
     pub(crate) colors: Vec<String>,
     pub(crate) selected_color: usize,
-    pub(crate) opacity: u8,
     pub(crate) speed: u8,
     pub(crate) brightness: u8,
     pub(crate) live_when_muted: bool,
@@ -239,7 +238,6 @@ impl Default for AppConfig {
                     "#ffea20".to_string(),
                 ],
                 selected_color: 0,
-                opacity: 25,
                 speed: 75,
                 brightness: 100,
                 live_when_muted: true,
@@ -286,7 +284,6 @@ impl AppConfig {
         validate_percent("audio.mic_volume", self.audio.mic_volume)?;
         validate_percent("audio.mic_monitoring", self.audio.mic_monitoring)?;
         validate_percent("audio.headphone_volume", self.audio.headphone_volume)?;
-        validate_percent("lighting.opacity", self.lighting.opacity)?;
         validate_percent("lighting.speed", self.lighting.speed)?;
         validate_percent("lighting.brightness", self.lighting.brightness)?;
         if self.lighting.colors.is_empty() {

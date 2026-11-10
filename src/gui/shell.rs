@@ -9,14 +9,14 @@ use crate::{
     audio::set_mic_mute,
     config::{export_config, import_config},
     diagnostics::export_diagnostics_bundle,
-    gui_widgets::section_label,
+    gui_widgets::{card_frame, pill, section_label},
     logging::log_event,
     model::HidEvent,
     paths::log_file_path,
     tray::TrayHandle,
 };
 
-use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice, outside_event_loop};
+use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice, outside_event_loop, theme};
 
 #[cfg(windows)]
 const OPEN_LOGS_LABEL: &str = "Open logs in terminal";
@@ -52,8 +52,10 @@ fn log_viewer_command(log: &Path) -> Command {
 }
 
 impl MicLiteApp {
-    const DASHBOARD_STAGE_HEIGHT: f32 = 250.0;
-    const DASHBOARD_COLUMN_GAP: f32 = 18.0;
+    const DASHBOARD_STAGE_HEIGHT: f32 = 158.0;
+    const DASHBOARD_COLUMN_GAP: f32 = 12.0;
+    /// Height of the three control cards, sized to the tallest (colour and actions).
+    const DASHBOARD_CARD_HEIGHT: f32 = 310.0;
 
     pub(super) fn ensure_tray_started(&mut self) {
         if self.tray_handle.is_none() {
@@ -142,14 +144,24 @@ impl MicLiteApp {
 
     pub(super) fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("HyperX QuadCast S");
+            ui.label(
+                egui::RichText::new("QuadCast S")
+                    .size(20.0)
+                    .strong()
+                    .color(theme::TEXT),
+            );
+            ui.label(egui::RichText::new("HyperX Mic Lite").color(theme::TEXT_DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(12.0);
-                ui.menu_button("⚙", |ui| {
+                ui.menu_button(egui::RichText::new("⚙").size(16.0), |ui| {
                     self.ui_settings_menu(ui);
                 })
                 .response
                 .on_hover_text("Settings");
+                if self.devices.connected() {
+                    pill(ui, "Connected", theme::GOOD);
+                } else {
+                    pill(ui, "Disconnected", theme::ERROR);
+                }
             });
         });
     }
@@ -290,17 +302,38 @@ impl MicLiteApp {
 
     pub(super) fn ui_dashboard(&mut self, ui: &mut egui::Ui) {
         self.ui_mic_stage(ui, Self::DASHBOARD_STAGE_HEIGHT);
-        ui.separator();
+        ui.add_space(Self::DASHBOARD_COLUMN_GAP);
         let gap = Self::DASHBOARD_COLUMN_GAP;
+        let width = (ui.available_width() - 2.0 * gap) / 3.0;
         ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.allocate_ui(egui::vec2(190.0, 320.0), |ui| {
-                self.ui_audio_panel(ui);
-            });
-
-            ui.add_space(gap);
-
-            self.ui_lighting_panel(ui, gap);
+            ui.spacing_mut().item_spacing.x = gap;
+            dashboard_card(ui, "Audio", width, |ui| self.ui_audio_panel(ui));
+            dashboard_card(ui, "Lighting", width, |ui| self.ui_effect_panel(ui));
+            dashboard_card(ui, "Color", width, |ui| self.ui_color_panel(ui));
         });
     }
+}
+
+/// One of the three equal control cards under the stage.
+fn dashboard_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    width: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    // The frame adds its margin and border around the content.
+    let chrome = 2.0 * 14.0 + 2.0;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, MicLiteApp::DASHBOARD_CARD_HEIGHT),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            card_frame().show(ui, |ui| {
+                ui.set_width(width - chrome);
+                ui.set_min_height(MicLiteApp::DASHBOARD_CARD_HEIGHT - chrome);
+                section_label(ui, title);
+                ui.add_space(6.0);
+                add_contents(ui);
+            });
+        },
+    );
 }

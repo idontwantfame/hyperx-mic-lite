@@ -6,10 +6,10 @@ use crate::{
         AudioClassControl, input_peak_value, mic_status, set_audio_control_volume, set_mic_mute,
         set_mic_volume_percent,
     },
-    gui_widgets::{percent_slider, section_label},
+    gui_widgets::{level_meter, secondary_button, value_row, value_slider},
 };
 
-use super::MicLiteApp;
+use super::{MicLiteApp, theme};
 
 impl MicLiteApp {
     pub(super) fn refresh_input_peak(&mut self) {
@@ -89,60 +89,51 @@ impl MicLiteApp {
 
     pub(super) fn ui_audio_panel(&mut self, ui: &mut egui::Ui) {
         let muted = self.is_muted();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                section_label(ui, "AUDIO");
-                ui.add_space(4.0);
-                section_label(ui, "MIC VOLUME");
-                if percent_slider(ui, &mut self.mic_volume, 160.0).changed() {
-                    self.set_volume();
-                    self.save_config_snapshot();
-                }
+        if value_slider(ui, "Mic level", &mut self.mic_volume).changed() {
+            self.set_volume();
+            self.save_config_snapshot();
+        }
 
-                ui.add_space(6.0);
-                section_label(ui, "INPUT LEVEL");
-                let display_peak = self.input_peak.sqrt().clamp(0.0, 1.0);
-                ui.add(
-                    egui::ProgressBar::new(display_peak)
-                        .desired_width(160.0)
-                        .text(format!("{:.1}%", display_peak * 100.0)),
-                );
-                ui.small("Bottom dial controls hardware gain.");
+        ui.add_space(6.0);
+        let display_peak = self.input_peak.sqrt().clamp(0.0, 1.0);
+        value_row(ui, "Input", &format!("{:.0}%", display_peak * 100.0));
+        level_meter(ui, display_peak).on_hover_text("The dial on the mic sets hardware gain.");
 
-                ui.add_space(6.0);
-                section_label(ui, "MIC MONITORING");
-                if percent_slider(ui, &mut self.mic_monitoring, 160.0).changed() {
-                    self.set_mic_monitoring();
-                    self.save_config_snapshot();
-                }
+        ui.add_space(8.0);
+        if value_slider(ui, "Monitoring", &mut self.mic_monitoring).changed() {
+            self.set_mic_monitoring();
+            self.save_config_snapshot();
+        }
 
-                ui.add_space(6.0);
-                section_label(ui, "HEADPHONE VOLUME");
-                if percent_slider(ui, &mut self.headphone_volume, 160.0).changed() {
-                    self.set_headphone_volume();
-                    self.save_config_snapshot();
-                }
+        ui.add_space(6.0);
+        if value_slider(ui, "Headphones", &mut self.headphone_volume).changed() {
+            self.set_headphone_volume();
+            self.save_config_snapshot();
+        }
 
-                ui.add_space(8.0);
-                let button_text = if muted {
-                    "Unmute microphone"
-                } else {
-                    "Mute microphone"
-                };
-                if ui
-                    .add_sized([150.0, 24.0], egui::Button::new(button_text))
-                    .clicked()
-                {
-                    self.set_mute(!muted);
-                }
+        ui.add_space(12.0);
+        let width = ui.available_width();
+        let clicked = if muted {
+            ui.add_sized(
+                [width, 30.0],
+                egui::Button::new(
+                    egui::RichText::new("Unmute microphone")
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(theme::ERROR.gamma_multiply(0.7)),
+            )
+            .clicked()
+        } else {
+            secondary_button(ui, "Mute microphone", width).clicked()
+        };
+        if clicked {
+            self.set_mute(!muted);
+        }
 
-                if let Some(error) = &self.status_error {
-                    ui.add_space(8.0);
-                    ui.colored_label(egui::Color32::from_rgb(255, 120, 120), error);
-                }
-            });
-        });
+        if let Some(error) = &self.status_error {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(error).size(11.5).color(theme::ERROR));
+        }
     }
 }

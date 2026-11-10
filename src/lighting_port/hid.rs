@@ -1,7 +1,9 @@
 //! Lighting reports through hidapi, which reaches the controller's HID collection directly.
 
 use super::{REPORT_LEN, log_packet_attempt};
-use crate::lighting::{LightingError, is_supported_lighting_device, lighting_device_score};
+use crate::lighting::{
+    LightingError, hid_api, is_supported_lighting_device, lighting_device_score,
+};
 
 pub(crate) struct LightingPort {
     device: hidapi::HidDevice,
@@ -10,7 +12,7 @@ pub(crate) struct LightingPort {
 impl LightingPort {
     /// Open the best-scoring lighting interface of the connected controller.
     pub(crate) fn open() -> Result<Self, LightingError> {
-        let api = hidapi::HidApi::new().map_err(|error| LightingError::Hid(error.to_string()))?;
+        let api = hid_api().map_err(|error| LightingError::Hid(error.to_string()))?;
         let info = api
             .device_list()
             .filter(|device| is_supported_lighting_device(device))

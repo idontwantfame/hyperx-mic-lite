@@ -26,8 +26,9 @@ use crate::{
     diagnostics::run_diagnostics_command,
     gui::MicLiteApp,
     lighting::{
-        print_lighting_detection, print_lighting_hid_dump, run_hid_monitor, run_level_monitor,
-        run_lighting_effect, run_lighting_save, run_lighting_solid, run_lighting_vu_test,
+        init_hid_on_this_thread, print_lighting_detection, print_lighting_hid_dump,
+        run_hid_monitor, run_level_monitor, run_lighting_effect, run_lighting_save,
+        run_lighting_solid, run_lighting_vu_test,
     },
     logging::{install_panic_hook, log_event},
     logs::run_logs_command,
@@ -237,6 +238,9 @@ Usage:\n\
     );
 }
 
+/// The GUI is laid out for one fixed window size.
+const WINDOW_SIZE: [f32; 2] = [700.0, 598.0];
+
 pub(crate) fn run_gui(args: &[String]) {
     let start_minimized = args
         .iter()
@@ -249,12 +253,19 @@ pub(crate) fn run_gui(args: &[String]) {
         process::exit(2);
     }
     log_event("info", "gui.start", &[]);
+    if let Err(error) = init_hid_on_this_thread() {
+        log_event(
+            "warn",
+            "gui.hid_init.error",
+            &[("message", error.to_string())],
+        );
+    }
     let config = load_or_create_config().unwrap_or_else(|_| AppConfig::default());
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("HyperX Mic Lite")
-        .with_inner_size([670.0, 650.0])
-        .with_min_inner_size([670.0, 650.0])
-        .with_max_inner_size([670.0, 650.0])
+        .with_inner_size(WINDOW_SIZE)
+        .with_min_inner_size(WINDOW_SIZE)
+        .with_max_inner_size(WINDOW_SIZE)
         .with_resizable(false);
     if let (Some(x), Some(y)) = (config.ui.window_x, config.ui.window_y) {
         viewport = viewport.with_position([x, y]);
@@ -269,7 +280,7 @@ pub(crate) fn run_gui(args: &[String]) {
         "HyperX Mic Lite",
         options,
         Box::new(|context| {
-            context.egui_ctx.set_visuals(egui::Visuals::dark());
+            crate::gui::theme::apply(&context.egui_ctx);
             Ok(Box::new(MicLiteApp::new(start_minimized)))
         }),
     );

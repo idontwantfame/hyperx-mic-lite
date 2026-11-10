@@ -166,7 +166,6 @@ Writable command keys:
 - `target`
 - `brightness`
 - `speed`
-- `opacity`
 - `live_when_muted`
 - `apply`
 - `stop`

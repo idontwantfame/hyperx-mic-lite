@@ -1,9 +1,11 @@
 mod audio_panel;
 mod device_events;
 mod lighting_panel;
+mod lighting_preview;
 mod mic_stage;
 mod mqtt_panel;
 mod shell;
+pub(crate) mod theme;
 
 use eframe::egui;
 use std::{
@@ -83,6 +85,8 @@ pub(crate) struct MicLiteApp {
     lighting_events: Receiver<LightingUiEvent>,
     lighting_event_sender: Sender<LightingUiEvent>,
     lighting_notice: Option<UiNotice>,
+    /// Animates the drawn microphone with the selected lighting settings.
+    lighting_preview: lighting_preview::LightingPreview,
     mqtt_bridge: Option<MqttBridge>,
     mqtt_commands: Option<Receiver<MqttCommand>>,
     mqtt_config: MqttConfig,
@@ -180,7 +184,6 @@ impl MicLiteApp {
                     colors
                 },
                 selected_color: config.lighting.selected_color,
-                opacity: config.lighting.opacity,
                 speed: config.lighting.speed,
                 brightness: config.lighting.brightness,
                 live_when_muted: config.lighting.live_when_muted,
@@ -191,6 +194,7 @@ impl MicLiteApp {
             lighting_events,
             lighting_event_sender,
             lighting_notice: None,
+            lighting_preview: lighting_preview::LightingPreview::new(),
             mqtt_bridge: mqtt_runtime.as_ref().map(|runtime| runtime.bridge.clone()),
             mqtt_commands: mqtt_runtime.map(|runtime| runtime.commands),
             mqtt_config: config.mqtt.clone(),
@@ -267,7 +271,6 @@ impl MicLiteApp {
                     .map(|color| color_to_hex(*color))
                     .collect(),
                 selected_color: self.lighting.selected_color,
-                opacity: self.lighting.opacity,
                 speed: self.lighting.speed,
                 brightness: self.lighting.brightness,
                 live_when_muted: self.lighting.live_when_muted,
@@ -318,10 +321,10 @@ fn outside_event_loop<T: Send>(work: impl FnOnce() -> T + Send) -> T {
 
 fn notice_color(severity: NoticeSeverity) -> egui::Color32 {
     match severity {
-        NoticeSeverity::Good => egui::Color32::from_rgb(118, 220, 150),
-        NoticeSeverity::Info => egui::Color32::from_rgb(150, 190, 235),
-        NoticeSeverity::Warning => egui::Color32::from_rgb(255, 195, 95),
-        NoticeSeverity::Error => egui::Color32::from_rgb(255, 120, 120),
+        NoticeSeverity::Good => theme::GOOD,
+        NoticeSeverity::Info => theme::INFO,
+        NoticeSeverity::Warning => theme::WARNING,
+        NoticeSeverity::Error => theme::ERROR,
     }
 }
 
@@ -396,22 +399,15 @@ impl eframe::App for MicLiteApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let inner_width = (ui.available_width() - 20.0).max(0.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.set_width(inner_width);
-                ui.set_max_width(inner_width);
-                ui.add_space(8.0);
+        ui.painter()
+            .rect_filled(ui.max_rect(), 0.0, theme::BACKGROUND);
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| {
                 self.ui_top_bar(ui);
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
+                ui.add_space(12.0);
                 self.ui_dashboard(ui);
             });
-            ui.add_space(10.0);
-        });
         self.ui_mqtt_settings_window(&ctx);
     }
 }

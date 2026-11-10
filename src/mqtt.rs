@@ -27,7 +27,6 @@ pub(crate) enum MqttCommand {
     SetTarget(LightTarget),
     SetBrightness(u8),
     SetSpeed(u8),
-    SetOpacity(u8),
     SetLiveWhenMuted(bool),
     ApplyLighting,
     StopLighting,
@@ -70,7 +69,6 @@ pub(crate) struct MqttStateSnapshot {
     pub(crate) target: String,
     pub(crate) brightness: u8,
     pub(crate) speed: u8,
-    pub(crate) opacity: u8,
     pub(crate) live_when_muted: bool,
 }
 
@@ -305,14 +303,6 @@ impl MqttBridge {
         );
         self.publish_changed_value(
             previous,
-            |snapshot| snapshot.opacity,
-            state.opacity,
-            "opacity",
-            state.opacity.to_string(),
-            self.retain_state,
-        );
-        self.publish_changed_value(
-            previous,
             |snapshot| snapshot.live_when_muted,
             state.live_when_muted,
             "live_when_muted",
@@ -387,7 +377,6 @@ fn mqtt_state_metadata_changed(
         || state.target != previous.target
         || state.brightness != previous.brightness
         || state.speed != previous.speed
-        || state.opacity != previous.opacity
         || state.live_when_muted != previous.live_when_muted
 }
 
@@ -472,14 +461,6 @@ fn publish_discovery(client: &Client, topics: &MqttTopics, qos: QoS) {
             topics.state("speed"),
             topics.command("speed"),
         ),
-        discovery_number(
-            topics,
-            "opacity",
-            "Lighting Opacity",
-            "brightness-percent",
-            topics.state("opacity"),
-            topics.command("opacity"),
-        ),
         discovery_sensor(
             topics,
             "input_level",
@@ -546,6 +527,28 @@ fn publish_discovery(client: &Client, topics: &MqttTopics, qos: QoS) {
     for (topic, payload) in definitions {
         publish_json(client, topic, qos, true, &payload);
     }
+    for topic in retired_topics(topics) {
+        if let Err(error) = client.publish(topic, qos, true, Vec::new()) {
+            log_event(
+                "warn",
+                "mqtt.publish.error",
+                &[("message", error.to_string())],
+            );
+        }
+    }
+}
+
+/// Number entities earlier versions published and this one no longer does.
+const RETIRED_NUMBER_ENTITIES: [&str; 1] = ["opacity"];
+
+/// Topics to clear for retired entities. Discovery configs and retained state stay on the
+/// broker after the app stops publishing them, and Home Assistant only removes an entity
+/// once its config topic is cleared with an empty retained payload.
+fn retired_topics(topics: &MqttTopics) -> Vec<String> {
+    RETIRED_NUMBER_ENTITIES
+        .iter()
+        .flat_map(|key| [topics.discovery("number", key), topics.state(key)])
+        .collect()
 }
 
 fn discovery_base(topics: &MqttTopics, key: &str, name: &str, icon: &str) -> serde_json::Value {
@@ -662,7 +665,6 @@ fn parse_command(topics: &MqttTopics, topic: &str, payload: &str) -> Option<Mqtt
         "headphone_volume" => parse_percent(payload).map(MqttCommand::SetHeadphoneVolume),
         "brightness" => parse_percent(payload).map(MqttCommand::SetBrightness),
         "speed" => parse_percent(payload).map(MqttCommand::SetSpeed),
-        "opacity" => parse_percent(payload).map(MqttCommand::SetOpacity),
         "effect" => parse_effect(payload).map(MqttCommand::SetEffect),
         "target" => parse_target(payload).map(MqttCommand::SetTarget),
         "live_when_muted" => parse_bool_command(payload).map(MqttCommand::SetLiveWhenMuted),
@@ -873,6 +875,24 @@ mod tests {
             topics.discovery("switch", "mute"),
             "homeassistant/switch/hyperx_mic_lite_mute/config"
         );
+    }
+
+    #[test]
+    fn retired_opacity_entity_and_state_are_cleared() {
+        let retired = retired_topics(&topics());
+
+        assert_eq!(
+            retired,
+            [
+                "homeassistant/number/hyperx_mic_lite_opacity/config",
+                "hyperx/mic/state/opacity",
+            ]
+        );
+    }
+
+    #[test]
+    fn opacity_is_no_longer_a_command() {
+        assert!(parse_command(&topics(), "hyperx/mic/command/opacity", "50").is_none());
     }
 
     #[test]

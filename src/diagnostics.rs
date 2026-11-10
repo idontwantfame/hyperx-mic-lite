@@ -8,7 +8,9 @@ use crate::{
     audio::{list_capture_devices, mic_status},
     constants::APP_NAME,
     hid_caps::hid_caps_for_path,
-    lighting::{detect_lighting_device, is_supported_lighting_device, lighting_device_score},
+    lighting::{
+        detect_lighting_device, hid_api, is_supported_lighting_device, lighting_device_score,
+    },
     logging::{log_event, log_timestamp},
     paths::{app_data_dir, config_path, log_file_path},
     time::unix_timestamp_seconds,
@@ -116,7 +118,7 @@ pub(crate) fn export_diagnostics_bundle(destination: &Path) -> Result<(), String
 }
 
 fn collect_lighting_hid_diagnostics() -> serde_json::Value {
-    let api = match hidapi::HidApi::new() {
+    let api = match hid_api() {
         Ok(api) => api,
         Err(error) => return serde_json::json!({ "error": error.to_string() }),
     };

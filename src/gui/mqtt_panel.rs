@@ -73,11 +73,6 @@ impl MicLiteApp {
                 self.save_config_snapshot();
                 self.apply_lighting_to_microphone();
             }
-            MqttCommand::SetOpacity(value) => {
-                self.lighting.opacity = value;
-                self.save_config_snapshot();
-                self.apply_lighting_to_microphone();
-            }
             MqttCommand::SetLiveWhenMuted(enabled) => {
                 self.lighting.live_when_muted = enabled;
                 self.save_config_snapshot();
@@ -159,7 +154,6 @@ impl MicLiteApp {
             target: self.lighting.target.as_config().to_string(),
             brightness: self.lighting.brightness,
             speed: self.lighting.speed,
-            opacity: self.lighting.opacity,
             live_when_muted: self.lighting.live_when_muted,
         };
         bridge.publish_state(&state, self.last_mqtt_state.as_ref());

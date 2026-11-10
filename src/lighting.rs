@@ -4,7 +4,7 @@ use std::{
     hash::Hash,
     process,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver},
     },
@@ -55,7 +55,6 @@ pub(crate) struct LightingState {
     pub(crate) bottom_effect: Effect,
     pub(crate) colors: Vec<egui::Color32>,
     pub(crate) selected_color: usize,
-    pub(crate) opacity: u8,
     pub(crate) speed: u8,
     pub(crate) brightness: u8,
     pub(crate) live_when_muted: bool,
@@ -75,7 +74,7 @@ pub(crate) struct LightingProgram {
 }
 
 const LIGHTING_CELL_COUNT: usize = 16;
-type LightingFrame = [[u8; 3]; LIGHTING_CELL_COUNT];
+pub(crate) type LightingFrame = [[u8; 3]; LIGHTING_CELL_COUNT];
 
 #[derive(Clone, Copy)]
 pub(crate) enum StreamDuration {
@@ -114,7 +113,7 @@ pub(crate) fn print_lighting_detection() {
 }
 
 pub(crate) fn print_lighting_hid_dump() {
-    let api = match hidapi::HidApi::new() {
+    let api = match hid_api() {
         Ok(api) => api,
         Err(error) => {
             eprintln!("{error}");
@@ -155,6 +154,31 @@ pub(crate) fn print_lighting_hid_dump() {
     }
 }
 
+/// Serializes hidapi enumeration.
+///
+/// hidapi's macOS backend enumerates through one process-wide IOHIDManager, and the button
+/// listener, the hotplug watcher and the startup probe all enumerate around the same time;
+/// overlapping calls crashed the app inside `hid_enumerate`.
+static HID_ENUMERATION: Mutex<()> = Mutex::new(());
+
+/// A fresh hidapi context, enumerated while no other thread is enumerating.
+pub(crate) fn hid_api() -> hidapi::HidResult<hidapi::HidApi> {
+    let _enumerating = HID_ENUMERATION
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    hidapi::HidApi::new()
+}
+
+/// Initialise hidapi on the calling thread, which must outlive all later HID use.
+///
+/// hidapi binds its macOS device manager to the run loop of the thread that initialises it.
+/// If that thread exits, the next enumeration schedules devices on a freed run loop and the
+/// process traps. The GUI calls this on the main thread before its event loop starts, so
+/// none of the short-lived threads that enumerate later becomes the owner.
+pub(crate) fn init_hid_on_this_thread() -> hidapi::HidResult<()> {
+    hid_api().map(drop)
+}
+
 /// USB vendor and product IDs of the QuadCast S lighting controller: the Kingston original
 /// and the later HP-branded revisions.
 pub(crate) const SUPPORTED_LIGHTING_IDS: [(u16, u16); 6] = [
@@ -167,7 +191,7 @@ pub(crate) const SUPPORTED_LIGHTING_IDS: [(u16, u16); 6] = [
 ];
 
 pub(crate) fn detect_lighting_device() -> Option<LightingDevice> {
-    let api = hidapi::HidApi::new().ok()?;
+    let api = hid_api().ok()?;
     api.device_list()
         .filter(|device| is_supported_lighting_device(device))
         .max_by_key(|device| lighting_device_score(device))
@@ -493,7 +517,7 @@ pub(crate) fn run_level_monitor(args: &[String]) {
 }
 
 fn monitor_hid_reports(duration: Duration) -> Result<(), String> {
-    let api = hidapi::HidApi::new().map_err(|error| error.to_string())?;
+    let api = hid_api().map_err(|error| error.to_string())?;
     let mut devices = Vec::new();
 
     for info in event_interfaces(&api) {
@@ -673,7 +697,7 @@ fn first_per_key<T, K: Eq + Hash>(
 fn open_hid_event_devices() -> Option<Vec<hidapi::HidDevice>> {
     // A fresh context per attempt on purpose: `HidApi` caches its device list at
     // construction, so a long-lived one would never see a mic plugged in later.
-    let api = match hidapi::HidApi::new() {
+    let api = match hid_api() {
         Ok(api) => api,
         Err(error) => {
             log_event(
@@ -898,9 +922,8 @@ pub(crate) fn stream_lighting_program_cancelable(
     let port = LightingPort::open()?;
 
     let header = build_display_header_packet();
-    let (frames, top_frames, bottom_frames) = build_program_frames(program)?;
+    let mut sequence = FrameSequence::new(program)?;
     let started = std::time::Instant::now();
-    let mut index = 0usize;
     let frame_delay = effect_frame_delay(program.speed);
     let mut vu_meter = VuMeterState::new();
     let capture_monitor = start_vu_capture_monitor(program, active_effect);
@@ -916,21 +939,12 @@ pub(crate) fn stream_lighting_program_cancelable(
             break;
         }
         let frame = if active_effect == Some(Effect::VuMeter) {
-            vu_meter.next_frame(program, capture_monitor.as_ref())
-        } else if program.split_layers {
-            let top = top_frames[index % top_frames.len()];
-            let bottom = bottom_frames[index % bottom_frames.len()];
-            index += 1;
-            combine_zone_frames(top, bottom)
+            apply_light_target(
+                vu_meter.next_frame(program, capture_monitor.as_ref()),
+                program.target,
+            )
         } else {
-            let frame = frames[index % frames.len()];
-            index += 1;
-            frame
-        };
-        let frame = if program.split_layers {
-            frame
-        } else {
-            apply_light_target(frame, program.target)
+            sequence.next_frame()
         };
         port.send_feature(&header, packet_log)?;
         port.send_feature(&build_frame_packet(frame), packet_log)?;
@@ -941,6 +955,51 @@ pub(crate) fn stream_lighting_program_cancelable(
 }
 
 type ProgramFrames = (Vec<LightingFrame>, Vec<LightingFrame>, Vec<LightingFrame>);
+
+/// A program's frames in the order the stream sends them, already narrowed to its target.
+///
+/// The device stream and the GUI preview both step through this, so the preview shows
+/// exactly what the mic is sent. The VU Meter follows live input instead of a sequence.
+pub(crate) struct FrameSequence {
+    frames: Vec<LightingFrame>,
+    top_frames: Vec<LightingFrame>,
+    bottom_frames: Vec<LightingFrame>,
+    split_layers: bool,
+    target: LightTarget,
+    index: usize,
+}
+
+impl FrameSequence {
+    pub(crate) fn new(program: &LightingProgram) -> Result<Self, LightingError> {
+        let (frames, top_frames, bottom_frames) = build_program_frames(program)?;
+        Ok(Self {
+            frames,
+            top_frames,
+            bottom_frames,
+            split_layers: program.split_layers,
+            target: program.target,
+            index: 0,
+        })
+    }
+
+    pub(crate) fn next_frame(&mut self) -> LightingFrame {
+        let index = self.index;
+        self.index = self.index.wrapping_add(1);
+        if self.split_layers {
+            combine_zone_frames(
+                self.top_frames[index % self.top_frames.len()],
+                self.bottom_frames[index % self.bottom_frames.len()],
+            )
+        } else {
+            apply_light_target(self.frames[index % self.frames.len()], self.target)
+        }
+    }
+}
+
+/// The colours the mic shows: cell 0 drives the top zone and cell 1 the bottom zone.
+pub(crate) fn zone_colors(frame: &LightingFrame) -> ([u8; 3], [u8; 3]) {
+    (frame[0], frame[1])
+}
 
 fn build_program_frames(program: &LightingProgram) -> Result<ProgramFrames, LightingError> {
     let frames = if program.split_layers {
@@ -1080,7 +1139,7 @@ fn build_frame_packet(frame: LightingFrame) -> [u8; 64] {
     packet
 }
 
-fn apply_light_target(mut frame: LightingFrame, target: LightTarget) -> LightingFrame {
+pub(crate) fn apply_light_target(mut frame: LightingFrame, target: LightTarget) -> LightingFrame {
     match target {
         LightTarget::All => frame,
         LightTarget::Top => {
@@ -1166,7 +1225,7 @@ fn normalized_colors(program: &LightingProgram) -> Vec<[u8; 3]> {
         .collect()
 }
 
-fn effect_frame_delay(speed: u8) -> Duration {
+pub(crate) fn effect_frame_delay(speed: u8) -> Duration {
     let millis = 140u64.saturating_sub(speed as u64);
     Duration::from_millis(millis.clamp(24, 140))
 }
@@ -1477,6 +1536,67 @@ mod tests {
     fn vu_target_level_stays_in_unit_range() {
         assert_eq!(vu_target_level(0.0), 0.0);
         assert!((vu_target_level(1.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    fn program(effect: Effect) -> LightingProgram {
+        LightingProgram {
+            effect,
+            target: LightTarget::All,
+            split_layers: false,
+            top_effect: Effect::Solid,
+            bottom_effect: Effect::Solid,
+            colors: vec![[255, 0, 0], [0, 0, 255]],
+            speed: 50,
+            brightness: 100,
+            shared_peak_bits: None,
+        }
+    }
+
+    #[test]
+    fn solid_program_lights_both_zones_with_the_first_color() {
+        let mut sequence = FrameSequence::new(&program(Effect::Solid)).expect("frames");
+
+        let frame = sequence.next_frame();
+
+        assert_eq!(zone_colors(&frame), ([255, 0, 0], [255, 0, 0]));
+    }
+
+    #[test]
+    fn top_target_leaves_the_bottom_zone_dark() {
+        let mut solid_top = program(Effect::Solid);
+        solid_top.target = LightTarget::Top;
+        let mut sequence = FrameSequence::new(&solid_top).expect("frames");
+
+        let frame = sequence.next_frame();
+
+        assert_eq!(zone_colors(&frame), ([255, 0, 0], [0, 0, 0]));
+    }
+
+    #[test]
+    fn split_layers_drive_each_zone_from_its_own_effect() {
+        let mut split = program(Effect::VuMeter);
+        split.split_layers = true;
+        split.colors = vec![[0, 255, 0]];
+        let mut sequence = FrameSequence::new(&split).expect("frames");
+
+        let frame = sequence.next_frame();
+
+        assert_eq!(zone_colors(&frame), ([0, 255, 0], [0, 255, 0]));
+        assert!(frame[2..].iter().all(|cell| *cell == [0, 0, 0]));
+    }
+
+    #[test]
+    fn sequence_starts_over_after_the_last_frame() {
+        let blink = program(Effect::Blink);
+        let length = build_effect_frames(Effect::Blink, &blink).len();
+        let mut sequence = FrameSequence::new(&blink).expect("frames");
+
+        let first = sequence.next_frame();
+        for _ in 1..length {
+            sequence.next_frame();
+        }
+
+        assert_eq!(sequence.next_frame(), first);
     }
 
     #[test]
