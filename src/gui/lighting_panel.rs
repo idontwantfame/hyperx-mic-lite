@@ -157,6 +157,17 @@ impl MicLiteApp {
         });
     }
 
+    /// Stop the running stream at the user's request.
+    pub(super) fn stop_lighting_stream(&mut self) {
+        if let Some(cancel) = &self.lighting_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.lighting_cancel = None;
+        // Explicit stop, so do not bring the stream back on the next reconnect.
+        self.lighting_stream_wanted = false;
+        log_event("info", "lighting.apply.stop", &[]);
+    }
+
     pub(super) fn save_lighting_to_microphone(&mut self) {
         if self.lighting_device.is_none() {
             log_event("warn", "lighting.save.no_device", &[]);
@@ -239,18 +250,9 @@ impl MicLiteApp {
     }
 
     fn ui_effect_grid(&mut self, ui: &mut egui::Ui) {
-        let effects = [
-            Effect::Wave,
-            Effect::Solid,
-            Effect::Cycle,
-            Effect::Pulse,
-            Effect::Blink,
-            Effect::Lightning,
-            Effect::VuMeter,
-        ];
         let gap = 6.0;
         let full_width = ui.available_width();
-        for row in effects.chunks(2) {
+        for row in Effect::ALL.chunks(2) {
             // A lone last effect spans the row instead of leaving a hole beside it.
             let chip_width = (full_width - gap * (row.len() - 1) as f32) / row.len() as f32;
             ui.horizontal(|ui| {
@@ -333,13 +335,7 @@ impl MicLiteApp {
             ui.spacing_mut().item_spacing.x = gap;
             let half = (width - gap) / 2.0;
             if secondary_button(ui, "Stop", half).clicked() {
-                if let Some(cancel) = &self.lighting_cancel {
-                    cancel.store(true, Ordering::Relaxed);
-                }
-                self.lighting_cancel = None;
-                // Explicit stop, so do not bring the stream back on the next reconnect.
-                self.lighting_stream_wanted = false;
-                log_event("info", "lighting.apply.stop", &[]);
+                self.stop_lighting_stream();
             }
             if secondary_button(ui, "Save to mic", half)
                 .on_hover_text("Write the effect into the mic's memory (experimental)")

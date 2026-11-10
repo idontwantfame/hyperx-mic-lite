@@ -22,7 +22,10 @@ use windows::Win32::{
 };
 use windows::core::PCWSTR;
 
-use super::glyph::{GLYPH_SIZE, GlyphPart, glyph_part};
+use super::{
+    TrayCommand, TrayState,
+    glyph::{GLYPH_SIZE, GlyphPart, glyph_part},
+};
 use crate::{
     constants::{TRAY_MENU_EXIT, TRAY_MENU_OPEN, TRAY_UID},
     logging::log_event,
@@ -51,6 +54,14 @@ impl TrayHandle {
     pub(crate) fn exit_requested() -> bool {
         TRAY_EXIT_REQUESTED.swap(false, Ordering::Relaxed)
     }
+
+    /// The Windows tray menu offers only Open and Exit, so it never queues commands.
+    pub(crate) fn take_command() -> Option<TrayCommand> {
+        None
+    }
+
+    /// The Windows tray icon does not reflect the mic state yet.
+    pub(crate) fn update(&mut self, _state: &TrayState) {}
 }
 
 fn wide_null(value: &str) -> Vec<u16> {
@@ -192,7 +203,8 @@ fn create_app_icon() -> Option<HICON> {
                     plot(x, y, 255, g, b);
                 }
                 Some(GlyphPart::Stand) => plot(x, y, 210, 214, 218),
-                None => {}
+                // The live glyph has no slash.
+                Some(GlyphPart::Slash) | None => {}
             }
         }
     }

@@ -208,7 +208,7 @@ impl MicLiteApp {
             minimize_to_tray: config.ui.minimize_to_tray,
             hidden_to_tray: false,
             force_exit: false,
-            tray_handle: if config.ui.minimize_to_tray {
+            tray_handle: if config.ui.minimize_to_tray || crate::tray::ALWAYS_SHOWN {
                 Some(TrayHandle::start())
             } else {
                 None
@@ -343,6 +343,9 @@ impl eframe::App for MicLiteApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             log_event("info", "tray.exit.request", &[]);
         }
+        while let Some(command) = TrayHandle::take_command() {
+            self.apply_tray_command(command);
+        }
         if ctx.input(|input| input.viewport().close_requested())
             && self.minimize_to_tray
             && !self.force_exit
@@ -386,6 +389,10 @@ impl eframe::App for MicLiteApp {
             log_event("info", "gui.start_minimized", &[]);
         }
         self.tick_background();
+        let tray_state = self.tray_state();
+        if let Some(tray) = self.tray_handle.as_mut() {
+            tray.update(&tray_state);
+        }
         self.remember_window_position(ctx);
         // Tick slower while hidden in the tray: only tray/MQTT/HID plumbing needs
         // servicing there, and 4 Hz keeps those responsive at a fraction of the CPU.

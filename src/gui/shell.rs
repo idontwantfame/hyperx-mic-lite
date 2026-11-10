@@ -13,10 +13,15 @@ use crate::{
     logging::log_event,
     model::HidEvent,
     paths::log_file_path,
-    tray::TrayHandle,
+    tray::{TrayCommand, TrayHandle, TrayState},
 };
 
 use super::{LightingUiEvent, MicLiteApp, NoticeSeverity, UiNotice, outside_event_loop, theme};
+
+#[cfg(windows)]
+const MINIMIZE_TO_TRAY_LABEL: &str = "Minimize to tray";
+#[cfg(target_os = "macos")]
+const MINIMIZE_TO_TRAY_LABEL: &str = "Keep running in the menu bar";
 
 #[cfg(windows)]
 const OPEN_LOGS_LABEL: &str = "Open logs in terminal";
@@ -60,6 +65,44 @@ impl MicLiteApp {
     pub(super) fn ensure_tray_started(&mut self) {
         if self.tray_handle.is_none() {
             self.tray_handle = Some(TrayHandle::start());
+        }
+    }
+
+    /// What the tray icon and its menu should show right now.
+    pub(super) fn tray_state(&self) -> TrayState {
+        TrayState {
+            connected: self.devices.connected(),
+            muted: self.is_muted(),
+            lighting_on: self.lighting_cancel.is_some(),
+            effect: self.lighting.effect,
+        }
+    }
+
+    pub(super) fn apply_tray_command(&mut self, command: TrayCommand) {
+        log_event(
+            "info",
+            "tray.command",
+            &[("command", format!("{command:?}"))],
+        );
+        match command {
+            TrayCommand::ToggleMute => {
+                let muted = self.is_muted();
+                self.set_mute(!muted);
+            }
+            TrayCommand::ToggleLighting => {
+                if self.lighting_cancel.is_some() {
+                    self.stop_lighting_stream();
+                } else {
+                    self.apply_lighting_to_microphone();
+                }
+            }
+            TrayCommand::SelectEffect(effect) => {
+                // A menu pick is a whole-mic effect, so leave split mode for it to show.
+                self.lighting.effect = effect;
+                self.lighting.split_layers = false;
+                self.save_config_snapshot();
+                self.apply_lighting_to_microphone();
+            }
         }
     }
 
@@ -171,7 +214,7 @@ impl MicLiteApp {
         section_label(ui, "SETTINGS");
         ui.separator();
         if ui
-            .checkbox(&mut self.minimize_to_tray, "Minimize to tray")
+            .checkbox(&mut self.minimize_to_tray, MINIMIZE_TO_TRAY_LABEL)
             .changed()
         {
             if self.minimize_to_tray {

@@ -14,3 +14,27 @@ mod win32;
 pub(crate) use menu_bar::TrayHandle;
 #[cfg(windows)]
 pub(crate) use win32::TrayHandle;
+
+use crate::model::Effect;
+
+/// What the icon and its menu reflect, refreshed by the GUI every tick.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TrayState {
+    pub(crate) connected: bool,
+    pub(crate) muted: bool,
+    pub(crate) lighting_on: bool,
+    pub(crate) effect: Effect,
+}
+
+/// A menu choice for the GUI to carry out. Open and Quit have their own flags.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TrayCommand {
+    ToggleMute,
+    ToggleLighting,
+    SelectEffect(Effect),
+}
+
+/// Whether the icon is shown for the app's whole life rather than only once the window is
+/// hidden. macOS runs the GUI as a menu bar app without a Dock icon, so there the icon is
+/// the only way back to the window.
+pub(crate) const ALWAYS_SHOWN: bool = cfg!(target_os = "macos");

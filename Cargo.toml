@@ -79,3 +79,5 @@ objc2-io-usb-host = { version = "0.3.2", default-features = false, features = [
     "IOUSBHostObject",
 ] }
 tray-icon = { version = "0.26.1", default-features = false }
+# Already in the tree through eframe; used to run the GUI as a menu bar app.
+winit = { version = "0.30.13", default-features = false }

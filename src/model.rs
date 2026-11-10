@@ -105,6 +105,17 @@ pub(crate) enum Effect {
 }
 
 impl Effect {
+    /// Every effect, in the order the GUI and the tray menu list them.
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Wave,
+        Self::Solid,
+        Self::Cycle,
+        Self::Pulse,
+        Self::Blink,
+        Self::Lightning,
+        Self::VuMeter,
+    ];
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Wave => "Wave",

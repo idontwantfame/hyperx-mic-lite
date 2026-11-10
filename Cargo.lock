@@ -1815,6 +1815,7 @@ dependencies = [
  "windows",
  "windows-core",
  "windows-service",
+ "winit",
  "winreg",
 ]
 

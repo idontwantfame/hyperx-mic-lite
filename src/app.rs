@@ -238,6 +238,21 @@ Usage:\n\
     );
 }
 
+/// Run as a menu bar app on macOS: no Dock icon or app menu, and the menu bar item opens
+/// the window. The bundle also sets `LSUIElement` so no Dock icon flashes at launch.
+#[cfg(target_os = "macos")]
+fn platform_event_loop_hook() -> Option<eframe::EventLoopBuilderHook> {
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+    Some(Box::new(|builder| {
+        builder.with_activation_policy(ActivationPolicy::Accessory);
+    }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_event_loop_hook() -> Option<eframe::EventLoopBuilderHook> {
+    None
+}
+
 /// The GUI is laid out for one fixed window size.
 const WINDOW_SIZE: [f32; 2] = [700.0, 598.0];
 
@@ -273,6 +288,7 @@ pub(crate) fn run_gui(args: &[String]) {
     let options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Glow,
+        event_loop_builder: platform_event_loop_hook(),
         ..Default::default()
     };
 

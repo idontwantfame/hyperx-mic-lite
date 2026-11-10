@@ -235,7 +235,7 @@ How the platforms differ:
 
 - Audio controls use CoreAudio. macOS shows the QuadCast S as two devices with the same name, an input and an output, and exposes the same USB Audio Class controls as properties: mic level and mute on the input, monitoring (sidetone) as the play-through level and mute, and headphone level and mute on the output. Levels are written in dB over the same ranges as on Windows.
 - Lighting packets go to the controller as raw USB `SET_REPORT` control transfers through IOUSBHost. macOS's HID driver declines the lighting interface (it has no interrupt-in endpoint), so hidapi cannot see it there. Mute and polar-pattern button events still come through hidapi.
-- Hiding to the tray hides to a menu bar icon. "Open logs" opens the log in Console.app.
+- The GUI runs as a menu bar app: there is no Dock icon. The menu bar mic is slashed while the mic is muted, and its menu mutes or unmutes, turns the lights on or off, picks the effect, opens the window, and quits. "Keep running in the menu bar" (the Windows "Minimize to tray" setting) decides whether closing the window hides it or quits. "Open logs" opens the log in Console.app.
 - There is no background service, Event Viewer source, or input endpoint meter; the meter always reads from the capture stream.
 
 ## Developer Notes

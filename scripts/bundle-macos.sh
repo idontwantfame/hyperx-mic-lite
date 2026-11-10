@@ -107,6 +107,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
     <string>$MIN_MACOS</string>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
